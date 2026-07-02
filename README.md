@@ -2,7 +2,7 @@
 
 **CodeGraph** is an open-source, AI-powered tool that transforms any public GitHub repository into an interactive, 2D force-directed knowledge graph in seconds. 
 
-By analyzing the Abstract Syntax Trees (AST) of the repository's source code and leveraging state-of-the-art Large Language Models, CodeGraph enables developers to instantly visualize and understand complex codebases.
+By analyzing the Abstract Syntax Trees (AST) of the repository's source code and leveraging state-of-the-art Large Language Models, CodeGraph enables developers to instantly visualize, explore, and converse with complex codebases.
 
 ## 🚀 Features
 
@@ -10,6 +10,9 @@ By analyzing the Abstract Syntax Trees (AST) of the repository's source code and
 - **AI Code Summarization:** Automatically generates plain-English summaries for every function and class using **Groq (llama-3.3-70b)** and **Mistral AI**.
 - **PageRank Centrality:** Automatically calculates node centrality using NetworkX to visually highlight the most important core functions (entry points and heavily utilized utilities).
 - **Deep Syntax Parsing:** Uses `tree-sitter` for precise, multi-language structural code parsing (Python currently optimized).
+- **"Ask me anything" AI Chatbot:** Interact with a context-aware AI assistant that answers questions grounded *strictly* in your repository's structure, streaming live tokens and guiding you directly to relevant nodes.
+- **Code Inspector:** View raw source code with syntax highlighting side-by-side with your graph. Features clickable inline node citations.
+- **File Tree Navigation:** Traverse the repository with a familiar VSCode-style sidebar that tightly syncs with the graph.
 - **Shareable Links:** Send your analyzed graph URL to your team for instant collaboration.
 
 ## 🛠️ Tech Stack
@@ -19,6 +22,7 @@ By analyzing the Abstract Syntax Trees (AST) of the repository's source code and
 - **Code Parsing:** `tree-sitter`
 - **Graph Processing:** NetworkX
 - **AI Providers:** Groq API, Mistral API
+- **Streaming:** Server-Sent Events (SSE) for both pipeline progress and LLM chatbot responses.
 
 ### Frontend
 - **Framework:** React + Vite
@@ -76,7 +80,7 @@ Navigate to `http://localhost:5173/` in your browser. Paste a GitHub repository 
 2. **Parsing:** Extracts functions, classes, docstrings, parameters, and dependencies using tree-sitter.
 3. **Graph Building:** Constructs a directed graph of the entire repository ecosystem using NetworkX, identifying isolated entry points and calculating mathematical centrality for UI scaling.
 4. **AI Enrichment:** Processes the abstract syntax data through Groq/Mistral to produce high-level human-readable summaries.
-5. **Rendering:** Sends the heavily optimized payload via SSE (Server-Sent Events) to the React frontend, which simulates a force-directed d3 layout in HTML5 Canvas.
+5. **Rendering & Chat:** Sends the heavily optimized payload via SSE (Server-Sent Events) to the React frontend. Users can interact with the d3 layout in an HTML5 Canvas, view source files, or chat with the AI using context generated on-the-fly from the graph.
 
 ## 📝 License
 This project is open-source and free to use.
