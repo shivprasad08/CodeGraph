@@ -4,8 +4,6 @@
 
 By analyzing the Abstract Syntax Trees (AST) of the repository's source code and leveraging state-of-the-art Large Language Models, CodeGraph enables developers to instantly visualize and understand complex codebases.
 
-![CodeGraph Preview](frontend/public/og-image.png)
-
 ## 🚀 Features
 
 - **Interactive Dependency Visualization:** Explore codebases as a graph where nodes represent Files, Classes, and Functions, and edges represent relationships (`calls`, `defines`, `imports`, `contains`).
