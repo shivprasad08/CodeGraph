@@ -20,6 +20,7 @@ import graph_builder
 import enrichment
 import cache
 import config
+import chat
 from models import AnalyzeRequest, GraphResponse
 from ingestion import RepoNotFoundError, FileLimitError
 
@@ -34,6 +35,7 @@ logger = logging.getLogger("codegraph")
 # In-memory job store
 # ---------------------------------------------------------------------------
 jobs: dict[str, dict] = {}
+chat_message_counts: dict[str, list[datetime]] = {}
 
 async def _cleanup_old_jobs():
     """Background task to remove jobs older than 1 hour every 10 minutes."""
@@ -451,6 +453,58 @@ async def get_file_source(job_id: str, file_path: str):
         "content": source_files[file_path],
         "language": "python"
     })
+
+
+@app.get("/chat/{job_id}/suggestions")
+async def get_suggestions(job_id: str):
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        raise HTTPException(404, "Job not found or not complete")
+    graph = jobs[job_id]["graph"]
+    return { "suggestions": chat.generate_suggestions(graph) }
+
+
+@app.post("/chat/{job_id}")
+async def chat_with_repo(job_id: str, request: Request):
+    """
+    Accepts a user question and conversation history.
+    Returns a streamed AI response grounded in the repo's graph data.
+    """
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        raise HTTPException(404, "Job not found or not complete")
+        
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
+        
+    message = body.get("message")
+    history = body.get("history", [])
+    
+    if not message:
+        raise HTTPException(400, "Message cannot be empty")
+        
+    # Rate Limiting
+    counts = chat_message_counts.get(job_id, [])
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    counts = [t for t in counts if t > one_hour_ago]
+    
+    if len(counts) >= 20:
+        chat_message_counts[job_id] = counts
+        raise HTTPException(429, "Chat limit reached. Max 20 messages per hour.")
+        
+    counts.append(datetime.now(timezone.utc))
+    chat_message_counts[job_id] = counts
+    
+    graph = jobs[job_id]["graph"]
+    
+    return StreamingResponse(
+        chat.stream_chat_response(job_id, graph, message, history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    )
 
 
 @app.get("/cache", response_model=list[dict])

@@ -42,7 +42,14 @@ function computeEdgeWidth(type) {
 // ---------------------------------------------------------------------------
 // GraphCanvas Component
 // ---------------------------------------------------------------------------
-export default function GraphCanvas({ graph, onNodeClick, selectedNodeId, highlightedNodeIds = new Set(), zoomToNodes }) {
+export default function GraphCanvas({ 
+  graph, 
+  onNodeClick, 
+  selectedNodeId, 
+  highlightedNodeIds = new Set(),
+  chatHighlightedNodeIds = new Set(),
+  zoomToNodes 
+}) {
   const fgRef = useRef();
   const containerRef = useRef();
   
@@ -53,11 +60,16 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId, highli
   const hoveredNodeIdRef = useRef(null);
   const selectedNodeIdRef = useRef(selectedNodeId);
   const highlightedNodeIdsRef = useRef(highlightedNodeIds);
+  const chatHighlightedNodeIdsRef = useRef(chatHighlightedNodeIds);
 
   // Sync refs
   useEffect(() => {
     highlightedNodeIdsRef.current = highlightedNodeIds;
   }, [highlightedNodeIds]);
+  
+  useEffect(() => {
+    chatHighlightedNodeIdsRef.current = chatHighlightedNodeIds;
+  }, [chatHighlightedNodeIds]);
 
   // Sync selectedNodeId prop to ref
   useEffect(() => {
@@ -187,8 +199,18 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId, highli
 
     const hasHighlight = highlightedNodeIdsRef.current.size > 0;
     const isHighlighted = hasHighlight ? highlightedNodeIdsRef.current.has(node.id) : true;
+    const isChatHighlighted = chatHighlightedNodeIdsRef.current?.has(node.id);
     
     ctx.globalAlpha = isHighlighted ? 1.0 : 0.15;
+
+    // 0. Chat Highlight Glow
+    if (isChatHighlighted) {
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, size * 3, 0, 2 * Math.PI);
+      ctx.strokeStyle = node.color + "80"; // 50% opacity border
+      ctx.lineWidth = 2 / globalScale; // keep border crisp
+      ctx.stroke();
+    }
 
     // 1. Glow effect for entry points and hovered nodes
     if (node.is_entry_point || isHovered) {

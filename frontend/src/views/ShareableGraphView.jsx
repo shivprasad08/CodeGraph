@@ -7,6 +7,7 @@ import NodePanel from '../components/NodePanel';
 
 import FileTree from '../components/FileTree';
 import CodeInspector from '../components/CodeInspector';
+import ChatSidebar from '../components/ChatSidebar';
 
 export default function ShareableGraphView() {
   const { owner, repo, jobId } = useParams();
@@ -26,6 +27,10 @@ export default function ShareableGraphView() {
   // Inspector state
   const [inspectorFilePath, setInspectorFilePath] = useState(null);
   const [inspectorVisible, setInspectorVisible] = useState(false);
+
+  // Chat state
+  const [chatSidebarVisible, setChatSidebarVisible] = useState(window.innerWidth >= 768);
+  const [chatHighlightedNodeIds, setChatHighlightedNodeIds] = useState(new Set());
 
   // Progress state for loading UI
   const [progress, setProgress] = useState(0);
@@ -131,6 +136,16 @@ export default function ShareableGraphView() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const effectiveHighlights = new Set([...highlightedNodeIds, ...chatHighlightedNodeIds]);
+
+  const handleChatHighlight = (nodeIds) => {
+    setChatHighlightedNodeIds(new Set(nodeIds));
+    setZoomToNodes([...nodeIds]);
+    setTimeout(() => {
+      setChatHighlightedNodeIds(new Set());
+    }, 5000);
+  };
+
   const handleFileSelect = (filePath) => {
     if (selectedFilePath === filePath) {
       if (!inspectorVisible) {
@@ -220,12 +235,13 @@ export default function ShareableGraphView() {
       />
 
       {/* Center/Right - Graph Canvas */}
-      <div className="flex-1 relative overflow-hidden flex flex-col">
+      <div className="flex-1 relative overflow-hidden flex flex-col min-w-[300px]">
         <GraphCanvas 
           graph={graphData} 
           onNodeClick={handleNodeNavigate} 
           selectedNodeId={selectedNode?.id ?? null}
-          highlightedNodeIds={highlightedNodeIds}
+          highlightedNodeIds={effectiveHighlights}
+          chatHighlightedNodeIds={chatHighlightedNodeIds}
           zoomToNodes={zoomToNodes}
         />
         
@@ -303,7 +319,31 @@ export default function ShareableGraphView() {
             commitSha={graphData?.commit_sha}
           />
         )}
+        
+        {/* Mobile Chat Toggle FAB */}
+        <button
+          onClick={() => setChatSidebarVisible(v => !v)}
+          className={`md:hidden absolute bottom-6 right-6 z-30 w-12 h-12 rounded-full shadow-xl flex items-center justify-center transition-colors ${
+            chatSidebarVisible ? 'bg-surface border border-border text-white' : 'bg-[#7c3aed] text-white hover:bg-[#9061f9]'
+          }`}
+        >
+          <span className={chatSidebarVisible ? 'text-xl' : 'text-2xl'}>
+            {chatSidebarVisible ? '×' : '✦'}
+          </span>
+        </button>
       </div>
+      
+      {/* Right Sidebar - Chat */}
+      {chatSidebarVisible && (
+        <div className="absolute md:relative right-0 top-0 bottom-0 z-20 md:z-auto shadow-2xl md:shadow-none h-full transition-transform">
+          <ChatSidebar
+            jobId={jobId}
+            graph={graphData}
+            onNodeHighlight={handleChatHighlight}
+            onNodeClick={handleNodeNavigate}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -87,3 +87,58 @@ export async function fetchFileSource(jobId, filePath) {
   if (!res.ok) throw new Error(`Failed to fetch source: ${res.status}`);
   return res.json();
 }
+
+export function streamChatMessage(jobId, message, history, onToken, onDone, onError) {
+  fetch(`${BASE_URL}/chat/${jobId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, history })
+  })
+  .then(async res => {
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      onError(err.error || err.detail || `Chat failed: ${res.status}`);
+      return;
+    }
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    
+    async function readStream() {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const text = decoder.decode(value);
+        const lines = text.split("\n");
+        
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.done) {
+              onDone(data.nodes || []);
+            } else {
+              onToken(data.token);
+            }
+          } catch (e) {
+            // ignore JSON parse errors from partial chunks
+          }
+        }
+      }
+    }
+    readStream();
+  })
+  .catch(err => onError(err.message));
+}
+
+export async function fetchChatSuggestions(jobId) {
+  try {
+    const res = await fetch(`${BASE_URL}/chat/${jobId}/suggestions`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.suggestions || [];
+  } catch {
+    return [];
+  }
+}
