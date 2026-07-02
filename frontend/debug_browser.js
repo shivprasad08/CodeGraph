@@ -16,12 +16,20 @@ import { chromium } from 'playwright';
 
   console.log("Waiting for analyze to complete (up to 60s)...");
   try {
-    await page.waitForSelector(".force-graph-container", { timeout: 60000 });
+    await page.waitForSelector("canvas", { timeout: 60000 });
     console.log("Graph loaded.");
   } catch (e) {
     console.log("Timeout waiting for graph.");
   }
   
+  console.log("Clicking a file in the sidebar...");
+  try {
+    await page.click('text=main.py');
+    console.log("Clicked main.py. Waiting for crash...");
+  } catch(e) {
+    console.log("Failed to click main.py", e);
+  }
+
   await new Promise(r => setTimeout(r, 2000));
   await browser.close();
 })();

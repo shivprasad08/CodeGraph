@@ -46,6 +46,8 @@ async def _cleanup_old_jobs():
                 if created_at and (now - created_at) > timedelta(hours=1):
                     to_delete.append(j_id)
             for j_id in to_delete:
+                if "source_files" in jobs[j_id]:
+                    del jobs[j_id]["source_files"]
                 del jobs[j_id]
         except Exception as e:
             logger.error(f"[cleanup] Error cleaning old jobs: {e}")
@@ -149,6 +151,12 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
 
         repo = ingestion_result["repo"]
         sha = ingestion_result["commit_sha"]
+
+        # Store raw file contents keyed by path for the /source endpoint
+        job["source_files"] = {
+            f["path"]: f["content"]
+            for f in ingestion_result["files"]
+        }
 
         # 3. Check Cache
         cached = cache.read_cache(repo, sha)
@@ -418,6 +426,31 @@ async def get_graph(job_id: str):
         content=job["graph"],
         headers={"Cache-Control": "public, max-age=3600"}
     )
+
+
+@app.get("/source/{job_id}/{file_path:path}")
+async def get_file_source(job_id: str, file_path: str):
+    """
+    Returns the raw source content of a file from an analyzed job.
+    File content is stored in the job's parse output during pipeline.
+    """
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    
+    job = jobs[job_id]
+    if job["status"] != "done":
+        raise HTTPException(202, "Analysis not complete")
+    
+    # Source is stored in job["source_files"]
+    source_files = job.get("source_files", {})
+    if file_path not in source_files:
+        raise HTTPException(404, f"File not found: {file_path}")
+    
+    return JSONResponse({
+        "path": file_path,
+        "content": source_files[file_path],
+        "language": "python"
+    })
 
 
 @app.get("/cache", response_model=list[dict])

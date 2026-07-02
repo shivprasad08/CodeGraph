@@ -9,6 +9,20 @@
   ::-webkit-scrollbar-track { background: #0a0a0f; }
   ::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+  
+  /* Highlight.js Custom Dark Theme for CodeGraph */
+  .hljs { background: transparent; color: #e2e8f0; }
+  .hljs-keyword    { color: #c084fc; }   /* purple — def, class, import, return */
+  .hljs-built_in   { color: #67e8f9; }   /* cyan — print, len, range */
+  .hljs-string     { color: #86efac; }   /* green */
+  .hljs-number     { color: #fca5a5; }   /* red-ish */
+  .hljs-comment    { color: #4b5563; font-style: italic; }
+  .hljs-decorator  { color: #fb923c; }   /* orange */
+  .hljs-title      { color: #93c5fd; font-weight: 600; }  /* blue — fn/class names */
+  .hljs-params     { color: #e2e8f0; }
+  .hljs-variable   { color: #e2e8f0; }
+  .hljs-operator   { color: #94a3b8; }
+  .hljs-punctuation{ color: #64748b; }
 }
 
 @layer utilities {

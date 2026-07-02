@@ -80,3 +80,10 @@ export async function fetchRepoMeta(owner, repo) {
   }
   return response.json();
 }
+
+export async function fetchFileSource(jobId, filePath) {
+  const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
+  const res = await fetch(`${BASE_URL}/source/${jobId}/${encodedPath}`);
+  if (!res.ok) throw new Error(`Failed to fetch source: ${res.status}`);
+  return res.json();
+}

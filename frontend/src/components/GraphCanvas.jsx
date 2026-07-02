@@ -42,7 +42,7 @@ function computeEdgeWidth(type) {
 // ---------------------------------------------------------------------------
 // GraphCanvas Component
 // ---------------------------------------------------------------------------
-export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
+export default function GraphCanvas({ graph, onNodeClick, selectedNodeId, highlightedNodeIds = new Set(), zoomToNodes }) {
   const fgRef = useRef();
   const containerRef = useRef();
   
@@ -52,6 +52,12 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
   // Use refs for canvas render cycle to avoid re-renders on hover
   const hoveredNodeIdRef = useRef(null);
   const selectedNodeIdRef = useRef(selectedNodeId);
+  const highlightedNodeIdsRef = useRef(highlightedNodeIds);
+
+  // Sync refs
+  useEffect(() => {
+    highlightedNodeIdsRef.current = highlightedNodeIds;
+  }, [highlightedNodeIds]);
 
   // Sync selectedNodeId prop to ref
   useEffect(() => {
@@ -66,6 +72,26 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
       }
     }
   }, [selectedNodeId, graph]);
+
+  // Handle zoomToNodes
+  useEffect(() => {
+    if (!zoomToNodes?.length || !fgRef.current || !graph?.nodes) return;
+    
+    const targetNodes = graph.nodes.filter(n => zoomToNodes.includes(n.id));
+    
+    if (!targetNodes.length) return;
+    
+    if (targetNodes.length === 1) {
+      // Find the actual node object in force graph if it has x,y
+      const fgNode = fgRef.current.graphData?.().nodes.find(n => n.id === targetNodes[0].id) || targetNodes[0];
+      if (fgNode.x !== undefined && fgNode.y !== undefined) {
+        fgRef.current.centerAt(fgNode.x, fgNode.y, 600);
+        fgRef.current.zoom(5, 600);
+      }
+    } else {
+      fgRef.current.zoomToFit(400, 80, n => zoomToNodes.includes(n.id));
+    }
+  }, [zoomToNodes, graph]);
 
   // Responsive sizing
   useEffect(() => {
@@ -159,31 +185,38 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
       return;
     }
 
+    const hasHighlight = highlightedNodeIdsRef.current.size > 0;
+    const isHighlighted = hasHighlight ? highlightedNodeIdsRef.current.has(node.id) : true;
+    
+    ctx.globalAlpha = isHighlighted ? 1.0 : 0.15;
+
     // 1. Glow effect for entry points and hovered nodes
     if (node.is_entry_point || isHovered) {
       ctx.beginPath();
       ctx.arc(node.x, node.y, size * 2, 0, 2 * Math.PI);
-      const gradient = ctx.createRadialGradient(
-        node.x, node.y, 0,
-        node.x, node.y, size * 2
-      );
-      gradient.addColorStop(0, node.color + "40"); // 25% opacity approx
-      gradient.addColorStop(1, node.color + "00");
-      ctx.fillStyle = gradient;
+      ctx.fillStyle = node.color + "33"; // 20% opacity instead of expensive radial gradient
       ctx.fill();
     }
 
     // 2. Main circle
     ctx.beginPath();
     ctx.arc(node.x, node.y, size, 0, 2 * Math.PI);
-    // Lighten color if hovered (by mixing with white approx, here we apply an overlay or use color)
-    ctx.fillStyle = isHovered ? node.color : node.color; // Basic color mapping
+    ctx.fillStyle = node.color;
     if (isHovered) {
         ctx.fillStyle = "#ffffff";
         ctx.fill();
-        ctx.fillStyle = node.color + "cc"; // Overlay original color
+        ctx.fillStyle = node.color + "cc";
     }
     ctx.fill();
+    
+    // Highlight ring for nodes in a selected file
+    if (hasHighlight && isHighlighted && !isSelected) {
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, size + 1, 0, 2 * Math.PI);
+      ctx.strokeStyle = node.color + "80";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
 
     // 3. Selected ring
     if (isSelected) {
@@ -202,7 +235,8 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       
-      const textWidth = ctx.measureText(label).width;
+      // Fast width calculation for monospace fonts instead of expensive ctx.measureText
+      const textWidth = label.length * fontSize * 0.6;
       const bw = textWidth + 4;
       const bh = fontSize + 3;
       
@@ -212,6 +246,9 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
       ctx.fillStyle = isSelected ? "#ffffff" : "rgba(255,255,255,0.85)";
       ctx.fillText(label, node.x, node.y + size + 2 + bh / 2);
     }
+    
+    // Reset alpha just in case
+    ctx.globalAlpha = 1.0;
   };
 
   const hasManyNodes = graph.nodes.length > 300;
@@ -233,7 +270,14 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
         nodeCanvasObjectMode={() => "replace"}
         nodeLabel={node => ""}
         
-        linkColor={link => link.color}
+        linkColor={link => {
+          if (highlightedNodeIds.size === 0) return link.color;
+          const srcId = typeof link.source === 'object' ? link.source.id : link.source;
+          const tgtId = typeof link.target === 'object' ? link.target.id : link.target;
+          return (highlightedNodeIds.has(srcId) || highlightedNodeIds.has(tgtId)) 
+            ? link.color 
+            : "rgba(255,255,255,0.03)";
+        }}
         linkWidth={link => link.width}
         linkDirectionalArrowLength={link => link.type === "calls" ? 4 : 0}
         linkDirectionalArrowRelPos={1}
@@ -241,7 +285,14 @@ export default function GraphCanvas({ graph, onNodeClick, selectedNodeId }) {
           hasManyNodes ? 0 : (link => link.type === "calls" ? 2 : 0)
         }
         linkDirectionalParticleSpeed={0.004}
-        linkDirectionalParticleColor={link => link.color}
+        linkDirectionalParticleColor={link => {
+          if (highlightedNodeIds.size === 0) return link.color;
+          const srcId = typeof link.source === 'object' ? link.source.id : link.source;
+          const tgtId = typeof link.target === 'object' ? link.target.id : link.target;
+          return (highlightedNodeIds.has(srcId) || highlightedNodeIds.has(tgtId)) 
+            ? link.color 
+            : "rgba(255,255,255,0)";
+        }}
         
         onNodeClick={handleNodeClick}
         onNodeHover={handleNodeHover}
