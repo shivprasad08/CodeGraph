@@ -45,13 +45,17 @@ function TreeNode({
   node, 
   depth, 
   allGraphNodes, 
-  onFileSelect, 
+  onFileSelect,
   onNodeSelect, 
+  onSimulateFile,
+  onContextMenu,
   selectedFilePath, 
   selectedNodeId, 
   searchQuery, 
   forceExpanded,
-  treeKey 
+  treeKey,
+  dirColorMap,
+  topLevelDirName
 }) {
   const [isOpen, setIsOpen] = useState(depth < 2);
 
@@ -77,6 +81,8 @@ function TreeNode({
     // If search is active, we rely on the parent (FileTree) having filtered the tree.
     // So if this directory was kept in the tree, we render it.
     const isEffectivelyOpen = isOpen || forceExpanded;
+    const currentTopLevelDirName = depth === 0 ? name : topLevelDirName;
+    const dirColor = dirColorMap ? dirColorMap[currentTopLevelDirName] : null;
 
     return (
       <div>
@@ -89,7 +95,13 @@ function TreeNode({
           <span className={`text-muted text-xs transition-transform duration-150 ${isEffectivelyOpen ? 'rotate-90' : 'rotate-0'}`}>
             ▶
           </span>
-          <span className="text-xs">{isEffectivelyOpen ? "📂" : "📁"}</span>
+          <span
+            className="w-2.5 h-2.5 rounded-sm flex-shrink-0"
+            style={{
+              backgroundColor: dirColor?.fill.replace("0.06", "0.3") ?? "transparent",
+              border: `1px solid ${dirColor?.stroke ?? "transparent"}`
+            }}
+          />
           <span className="font-mono text-xs text-white/70 group-hover:text-white truncate">
             {name}
           </span>
@@ -109,11 +121,15 @@ function TreeNode({
             allGraphNodes={allGraphNodes}
             onFileSelect={onFileSelect}
             onNodeSelect={onNodeSelect}
+            onSimulateFile={onSimulateFile}
+            onContextMenu={onContextMenu}
             selectedFilePath={selectedFilePath}
             selectedNodeId={selectedNodeId}
             searchQuery={searchQuery}
             forceExpanded={forceExpanded}
             treeKey={treeKey}
+            dirColorMap={dirColorMap}
+            topLevelDirName={currentTopLevelDirName}
           />
         ))}
       </div>
@@ -127,6 +143,10 @@ function TreeNode({
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
         className={`flex items-center gap-1.5 h-7 cursor-pointer select-none transition-colors group relative ${isSelected ? "bg-accent/15 border-l-2 border-accent" : "hover:bg-surface-hover border-l-2 border-transparent"}`}
         onClick={() => onFileSelect(node.__path)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (onContextMenu) onContextMenu(e, node.__path);
+        }}
         title={node.__path}
       >
         <span className="w-2 h-2 rounded-full flex-shrink-0 bg-node-file" />
@@ -194,12 +214,14 @@ function TreeNode({
 // Main FileTree Component
 // ---------------------------------------------------------------------------
 export default function FileTree({ 
-  graph, 
+  graph,
   onFileSelect, 
   onNodeSelect, 
+  onSimulateFile,
   selectedFilePath, 
   selectedNodeId,
-  hidden
+  hidden,
+  dirColorMap
 }) {
   const [sidebarWidth, setSidebarWidth] = useState(260);
   const [isResizing, setIsResizing] = useState(false);
@@ -207,6 +229,14 @@ export default function FileTree({
   const [searchVisible, setSearchVisible] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [treeKey, setTreeKey] = useState(0);
+  const [contextMenu, setContextMenu] = useState(null);
+
+  // Close context menu on click outside
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
   // Resize handler
   useEffect(() => {
@@ -354,11 +384,15 @@ export default function FileTree({
               allGraphNodes={graph.nodes}
               onFileSelect={onFileSelect}
               onNodeSelect={onNodeSelect}
+              onSimulateFile={onSimulateFile}
+              onContextMenu={(e, path) => setContextMenu({ x: e.clientX, y: e.clientY, path })}
               selectedFilePath={selectedFilePath}
               selectedNodeId={selectedNodeId}
               searchQuery={searchQuery}
               forceExpanded={searchQuery.length > 0}
               treeKey={treeKey}
+              dirColorMap={dirColorMap}
+              topLevelDirName={key}
             />
           ))
         )}
@@ -376,6 +410,35 @@ export default function FileTree({
         className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
         onMouseDown={() => setIsResizing(true)}
       />
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div 
+          className="fixed z-[9999] bg-surface border border-border rounded-lg shadow-xl py-1 min-w-[160px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          <div 
+            className="px-3 py-1.5 text-xs font-mono text-white hover:bg-surface-hover cursor-pointer"
+            onClick={() => {
+              onFileSelect(contextMenu.path);
+              setContextMenu(null);
+            }}
+          >
+            Select in graph
+          </div>
+          <div className="h-px bg-border my-1" />
+          <div 
+            className="px-3 py-1.5 text-xs font-mono text-accent hover:bg-surface-hover cursor-pointer flex items-center gap-2"
+            onClick={() => {
+              if (onSimulateFile) onSimulateFile(contextMenu.path);
+              setContextMenu(null);
+            }}
+          >
+            <span>⚡</span> Simulate changes
+          </div>
+        </div>
+      )}
     </div>
   );
 }

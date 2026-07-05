@@ -31,3 +31,8 @@ class GraphResponse(BaseModel):
     commit_sha: str
     nodes: List[GraphNode]
     edges: List[GraphEdge]
+
+class ImpactRequest(BaseModel):
+    source_node_id: str
+    change_description: str
+    blast_radius: dict

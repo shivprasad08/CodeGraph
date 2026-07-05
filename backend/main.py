@@ -21,7 +21,8 @@ import enrichment
 import cache
 import config
 import chat
-from models import AnalyzeRequest, GraphResponse
+import impact
+from models import AnalyzeRequest, GraphResponse, ImpactRequest
 from ingestion import RepoNotFoundError, FileLimitError
 
 logging.basicConfig(
@@ -166,6 +167,7 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
             logger.info(f"Cache hit for {repo} @ {sha}")
             job.update({
                 "graph": cached,
+                "analysis": cached.get("analysis"),
                 "status": "done",
                 "stage": "done",
                 "progress": 100,
@@ -214,7 +216,23 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
             logger.warning(f"Enrichment failed (non-fatal) for {repo}: {e}")
             # Non-fatal, continue with un-enriched graph
 
-        # 7. Write Cache
+        # Step 7: Static analysis
+        try:
+            import analyzer
+            analysis = analyzer.analyze_repo(parse_output, job.get("source_files", {}), graph)
+            # Merge analysis results onto graph nodes (severity badges)
+            for node in graph["nodes"]:
+                file_analysis = analysis["by_file"].get(node.get("file", ""), {})
+                node["issue_count"] = file_analysis.get("issue_count", 0)
+                node["issue_severity"] = file_analysis.get("severity", None)
+            jobs[job_id]["analysis"] = analysis
+            graph["analysis"] = analysis # Add it to graph so it gets cached
+            logger.info(f"[analyzer] Score: {analysis['score']}{analysis['grade']}")
+        except Exception as e:
+            logger.warning(f"[analyzer] Analysis failed (non-fatal): {e}")
+            jobs[job_id]["analysis"] = None
+
+        # 8. Write Cache
         logger.info(f"Writing cache for {repo} @ {sha}")
         cache.write_cache(repo, sha, graph)
 
@@ -430,6 +448,30 @@ async def get_graph(job_id: str):
     )
 
 
+@app.get("/analysis/{job_id}")
+async def get_analysis(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
+    
+    if job["status"] != "done":
+        return JSONResponse(
+            status_code=202,
+            content={"status": job["status"], "message": "Analysis still in progress"}
+        )
+    
+    if "analysis" not in job or job["analysis"] is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Analysis data missing or failed", "detail": None}
+        )
+        
+    return JSONResponse(
+        status_code=200,
+        content=job["analysis"]
+    )
+
+
 @app.get("/source/{job_id}/{file_path:path}")
 async def get_file_source(job_id: str, file_path: str):
     """
@@ -499,6 +541,58 @@ async def chat_with_repo(job_id: str, request: Request):
     
     return StreamingResponse(
         chat.stream_chat_response(job_id, graph, message, history),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    )
+
+@app.post("/impact/{job_id}")
+async def analyze_impact(job_id: str, request: Request, body: ImpactRequest):
+    """
+    Given a changed file/function and blast radius data,
+    returns a streaming LLM analysis of the impact.
+    """
+    if job_id not in jobs or jobs[job_id]["status"] != "done":
+        raise HTTPException(404, "Job not found or not complete")
+        
+    graph = jobs[job_id]["graph"]
+    
+    # Simple rate limit logic similar to chat
+    ip = request.headers.get("X-Forwarded-For")
+    if not ip:
+        ip = request.client.host if request.client else "unknown"
+    else:
+        ip = ip.split(",")[0].strip()
+        
+    # Reuse chat counts or use separate impact counts
+    impact_key = f"impact_{ip}_{job_id}"
+    counts = chat_message_counts.get(impact_key, [])
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    counts = [t for t in counts if t > one_hour_ago]
+    
+    if len(counts) >= 10:
+        chat_message_counts[impact_key] = counts
+        raise HTTPException(429, "Impact analysis limit reached. Max 10 requests per hour.")
+        
+    counts.append(datetime.now(timezone.utc))
+    chat_message_counts[impact_key] = counts
+    
+    # Locate the node in graph
+    source_node = None
+    for n in graph.get("nodes", []):
+        if n["id"] == body.source_node_id:
+            source_node = n
+            break
+            
+    if not source_node:
+        raise HTTPException(404, f"Source node {body.source_node_id} not found in graph")
+        
+    return StreamingResponse(
+        impact.stream_impact_analysis(
+            job_id, graph, source_node, body.change_description, body.blast_radius
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

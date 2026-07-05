@@ -1,22 +1,31 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchRepo, fetchGraph, subscribeToJob } from '../api';
+import { fetchRepo, fetchGraph, subscribeToJob, fetchAnalysis } from '../api';
 import ProgressBar from '../components/ProgressBar';
 import GraphCanvas from '../components/GraphCanvas';
 import NodePanel from '../components/NodePanel';
+import { buildDirectoryColorMap } from '../utils/directoryColors';
 
 import FileTree from '../components/FileTree';
 import CodeInspector from '../components/CodeInspector';
-import ChatSidebar from '../components/ChatSidebar';
+import HealthPanel from '../components/HealthPanel';
 
 export default function ShareableGraphView() {
   const { owner, repo, jobId } = useParams();
   const navigate = useNavigate();
   
   const [graphData, setGraphData] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [jobStatus, setJobStatus] = useState(null); // 'analyzing', 'error'
   const [error, setError] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
+  
+  // Compute directory colors globally for graph and file tree
+  const dirColorMap = useMemo(
+    () => (graphData ? buildDirectoryColorMap(graphData.nodes) : {}),
+    [graphData]
+  );
   
   // New layout and file tree states
   const [selectedFilePath, setSelectedFilePath] = useState(null);
@@ -28,9 +37,12 @@ export default function ShareableGraphView() {
   const [inspectorFilePath, setInspectorFilePath] = useState(null);
   const [inspectorVisible, setInspectorVisible] = useState(false);
 
-  // Chat state
-  const [chatSidebarVisible, setChatSidebarVisible] = useState(window.innerWidth >= 768);
   const [chatHighlightedNodeIds, setChatHighlightedNodeIds] = useState(new Set());
+
+  // Simulation state
+  const [simulationMode, setSimulationMode] = useState(false);
+  const [blastRadius, setBlastRadius] = useState(null);
+  const [simulationSourceFile, setSimulationSourceFile] = useState(null);
 
   // Progress state for loading UI
   const [progress, setProgress] = useState(0);
@@ -47,7 +59,10 @@ export default function ShareableGraphView() {
     const handleGlobalKeyDown = (e) => {
       if (e.key === 'Escape') {
         // Clear in priority order
-        if (document.activeElement?.id === 'file-tree-search') {
+        if (simulationMode) {
+          setSimulationMode(false);
+          setBlastRadius(null);
+        } else if (document.activeElement?.id === 'file-tree-search') {
           document.activeElement.blur();
         } else if (inspectorVisible) {
           setInspectorVisible(false);
@@ -72,7 +87,7 @@ export default function ShareableGraphView() {
     
     document.addEventListener('keydown', handleGlobalKeyDown);
     return () => document.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [selectedFilePath, selectedNode, inspectorVisible]);
+  }, [selectedFilePath, selectedNode, inspectorVisible, simulationMode]);
 
   useEffect(() => {
     // Set basic title immediately
@@ -100,6 +115,12 @@ export default function ShareableGraphView() {
             const finalGraph = await fetchGraph(jobId);
             setGraphData(finalGraph);
             setJobStatus('done');
+            
+            setAnalysisLoading(true);
+            fetchAnalysis(jobId).then(data => {
+              setAnalysis(data);
+              setAnalysisLoading(false);
+            }).catch(() => setAnalysisLoading(false));
           } catch (err) {
             setError(err.message || "Failed to load graph after completion");
             setJobStatus('error');
@@ -116,6 +137,14 @@ export default function ShareableGraphView() {
             setIsCached(true);
             setGraphData(res.graph);
             setJobStatus('done');
+            
+            if (jobId) {
+              setAnalysisLoading(true);
+              fetchAnalysis(jobId).then(data => {
+                setAnalysis(data);
+                setAnalysisLoading(false);
+              }).catch(() => setAnalysisLoading(false));
+            }
           } else if (res.status === 'analyzing') {
             // Redirect to the job URL to watch progress
             navigate(`/graph/${owner}/${repo}/jobs/${res.job_id}`, { replace: true });
@@ -174,9 +203,15 @@ export default function ShareableGraphView() {
     setZoomToNodes([...fileNodeIds]);
   };
 
+  const handleSimulateFile = (filePath) => {
+    setSimulationSourceFile(filePath);
+  };
+
   const handleNodeNavigate = (node) => {
     if (!node) {
       setSelectedNode(null);
+      setHighlightedNodeIds(new Set());
+      setSelectedFilePath(null);
       return;
     }
     setSelectedNode(node);
@@ -229,9 +264,11 @@ export default function ShareableGraphView() {
         graph={graphData}
         onFileSelect={handleFileSelect}
         onNodeSelect={handleNodeNavigate}
+        onSimulateFile={handleSimulateFile}
         selectedFilePath={selectedFilePath}
         selectedNodeId={selectedNode?.id ?? null}
         hidden={!sidebarVisible}
+        dirColorMap={dirColorMap}
       />
 
       {/* Center/Right - Graph Canvas */}
@@ -243,9 +280,22 @@ export default function ShareableGraphView() {
           highlightedNodeIds={effectiveHighlights}
           chatHighlightedNodeIds={chatHighlightedNodeIds}
           zoomToNodes={zoomToNodes}
+          dirColorMap={dirColorMap}
+          blastRadius={blastRadius}
+          simulationMode={simulationMode}
+          onExitSimulation={() => {
+            setSimulationMode(false);
+            setBlastRadius(null);
+          }}
         />
         
         {/* Top Overlay */}
+        {simulationMode && (
+          <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 bg-red-500/20 border border-red-500/40 rounded-full px-4 py-1.5 flex items-center gap-2 pointer-events-none">
+            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+            <div className="text-red-400 font-mono text-xs">SIMULATION ACTIVE — graph shows blast radius</div>
+          </div>
+        )}
         <div className="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none z-10">
           
           {/* Left Stats Pill */}
@@ -319,31 +369,20 @@ export default function ShareableGraphView() {
             commitSha={graphData?.commit_sha}
           />
         )}
-        
-        {/* Mobile Chat Toggle FAB */}
-        <button
-          onClick={() => setChatSidebarVisible(v => !v)}
-          className={`md:hidden absolute bottom-6 right-6 z-30 w-12 h-12 rounded-full shadow-xl flex items-center justify-center transition-colors ${
-            chatSidebarVisible ? 'bg-surface border border-border text-white' : 'bg-[#7c3aed] text-white hover:bg-[#9061f9]'
-          }`}
-        >
-          <span className={chatSidebarVisible ? 'text-xl' : 'text-2xl'}>
-            {chatSidebarVisible ? '×' : '✦'}
-          </span>
-        </button>
       </div>
       
-      {/* Right Sidebar - Chat */}
-      {chatSidebarVisible && (
-        <div className="absolute md:relative right-0 top-0 bottom-0 z-20 md:z-auto shadow-2xl md:shadow-none h-full transition-transform">
-          <ChatSidebar
-            jobId={jobId}
-            graph={graphData}
-            onNodeHighlight={handleChatHighlight}
-            onNodeClick={handleNodeNavigate}
-          />
-        </div>
-      )}
+      {/* Right Sidebar - Health & Chat */}
+      <HealthPanel
+        analysis={analysis}
+        graph={graphData}
+        jobId={jobId}
+        onNodeClick={handleNodeNavigate}
+        onNodeHighlight={(ids) => setChatHighlightedNodeIds(new Set(ids))}
+        isLoading={analysisLoading}
+        onBlastRadiusChange={setBlastRadius}
+        onSimulationModeChange={setSimulationMode}
+        simulationSourceFile={simulationSourceFile}
+      />
     </div>
   );
 }

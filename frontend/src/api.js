@@ -142,3 +142,60 @@ export async function fetchChatSuggestions(jobId) {
     return [];
   }
 }
+
+export async function fetchAnalysis(jobId) {
+  const res = await fetch(`${BASE_URL}/analysis/${jobId}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export function streamImpactAnalysis(
+  jobId, sourceNodeId, changeDescription, blastRadiusData,
+  onToken, onDone, onError
+) {
+  fetch(`${BASE_URL}/impact/${jobId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_node_id: sourceNodeId,
+      change_description: changeDescription,
+      blast_radius: blastRadiusData
+    })
+  })
+  .then(async res => {
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      onError(err.error || err.detail || `Impact analysis failed: ${res.status}`);
+      return;
+    }
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    
+    async function readStream() {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const text = decoder.decode(value);
+        const lines = text.split("\n");
+        
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.done) {
+              onDone({ riskLevel: data.risk_level, nodes: data.nodes || [] });
+            } else {
+              onToken(data.token);
+            }
+          } catch (e) {
+            // ignore JSON parse errors from partial chunks
+          }
+        }
+      }
+    }
+    readStream();
+  })
+  .catch(err => onError(err.message));
+}
