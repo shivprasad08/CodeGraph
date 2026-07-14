@@ -11,7 +11,9 @@ export default function HealthPanel({
   isLoading,
   onBlastRadiusChange,
   onSimulationModeChange,
-  simulationSourceFile
+  simulationSourceFile,
+  hidden,
+  onClose
 }) {
   const [activeTab, setActiveTab] = useState('health'); // 'health', 'chat', or 'simulate'
   const [activeFilter, setActiveFilter] = useState('All'); // 'All', 'high', 'medium', 'low'
@@ -75,9 +77,10 @@ export default function HealthPanel({
 
   const fileNodes = graph?.nodes?.filter(n => n.type === 'file') || [];
 
-  if (activeTab === 'chat') {
-    return (
-      <div className="w-[320px] flex-shrink-0 h-full bg-bg border-l border-border flex flex-col">
+  const renderContent = () => {
+    if (activeTab === 'chat') {
+      return (
+        <>
         {/* Tab Bar */}
         <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0">
           <button
@@ -106,14 +109,14 @@ export default function HealthPanel({
             onNodeHighlight={onNodeHighlight}
             onNodeClick={onNodeClick}
           />
-        </div>
-      </div>
-    );
-  }
+          </div>
+        </>
+      );
+    }
 
-  if (activeTab === 'simulate') {
-    return (
-      <div className="w-[320px] flex-shrink-0 h-full bg-bg border-l border-border flex flex-col">
+    if (activeTab === 'simulate') {
+      return (
+        <>
         {/* Tab Bar */}
         <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0">
           <button
@@ -145,12 +148,13 @@ export default function HealthPanel({
             onNodeNavigate={onNodeClick}
             simulationSourceFile={simulationSourceFile}
           />
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="w-[320px] flex-shrink-0 h-full bg-bg border-l border-border flex flex-col">
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
       {/* Tab Bar */}
       <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0 justify-between">
         <div className="flex gap-1">
@@ -426,6 +430,22 @@ export default function HealthPanel({
           </>
         )}
       </div>
-    </div>
+      </>
+    );
+  };
+
+  return (
+    <>
+      {/* Mobile Backdrop */}
+      <div 
+        className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-300 ${hidden ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        onClick={onClose}
+      />
+      
+      {/* Drawer Container */}
+      <div className={`fixed md:relative inset-y-0 right-0 z-50 w-[320px] max-w-[85vw] flex-shrink-0 h-full bg-bg border-l border-border flex flex-col transition-transform duration-300 md:transition-none ${hidden ? 'max-md:translate-x-full md:hidden' : 'translate-x-0'}`}>
+        {renderContent()}
+      </div>
+    </>
   );
 }

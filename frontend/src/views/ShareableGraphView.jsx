@@ -31,7 +31,8 @@ export default function ShareableGraphView() {
   const [selectedFilePath, setSelectedFilePath] = useState(null);
   const [highlightedNodeIds, setHighlightedNodeIds] = useState(new Set());
   const [zoomToNodes, setZoomToNodes] = useState(null);
-  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth >= 768);
+  const [chatVisible, setChatVisible] = useState(window.innerWidth >= 768);
 
   // Inspector state
   const [inspectorFilePath, setInspectorFilePath] = useState(null);
@@ -76,6 +77,9 @@ export default function ShareableGraphView() {
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
         e.preventDefault();
         setSidebarVisible(v => !v);
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'j') {
+        e.preventDefault();
+        setChatVisible(v => !v);
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
         e.preventDefault();
         setInspectorVisible(false);
@@ -116,11 +120,15 @@ export default function ShareableGraphView() {
             setGraphData(finalGraph);
             setJobStatus('done');
             
-            setAnalysisLoading(true);
-            fetchAnalysis(jobId).then(data => {
-              setAnalysis(data);
-              setAnalysisLoading(false);
-            }).catch(() => setAnalysisLoading(false));
+            if (finalGraph.analysis) {
+              setAnalysis(finalGraph.analysis);
+            } else {
+              setAnalysisLoading(true);
+              fetchAnalysis(jobId).then(data => {
+                setAnalysis(data);
+                setAnalysisLoading(false);
+              }).catch(() => setAnalysisLoading(false));
+            }
           } catch (err) {
             setError(err.message || "Failed to load graph after completion");
             setJobStatus('error');
@@ -138,7 +146,9 @@ export default function ShareableGraphView() {
             setGraphData(res.graph);
             setJobStatus('done');
             
-            if (jobId) {
+            if (res.graph.analysis) {
+              setAnalysis(res.graph.analysis);
+            } else if (jobId) {
               setAnalysisLoading(true);
               fetchAnalysis(jobId).then(data => {
                 setAnalysis(data);
@@ -186,12 +196,14 @@ export default function ShareableGraphView() {
         setZoomToNodes(null);
         setInspectorVisible(false);
       }
+      if (window.innerWidth < 768) setSidebarVisible(false); // Close on select for mobile
       return;
     }
     
     setSelectedFilePath(filePath);
     setInspectorFilePath(filePath);
     setInspectorVisible(true);
+    if (window.innerWidth < 768) setSidebarVisible(false); // Close on select for mobile
     
     if (!graphData) return;
     const fileNodeIds = new Set(
@@ -268,10 +280,11 @@ export default function ShareableGraphView() {
         selectedFilePath={selectedFilePath}
         selectedNodeId={selectedNode?.id ?? null}
         hidden={!sidebarVisible}
+        onClose={() => setSidebarVisible(false)}
         dirColorMap={dirColorMap}
       />
 
-      {/* Center/Right - Graph Canvas */}
+      {/* Center - Graph Canvas */}
       <div className="flex-1 relative overflow-hidden flex flex-col min-w-[300px]">
         <GraphCanvas 
           graph={graphData} 
@@ -298,8 +311,8 @@ export default function ShareableGraphView() {
         )}
         <div className="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none z-10">
           
-          {/* Left Stats Pill */}
-          <div className="bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-xl p-4 min-w-[200px] pointer-events-auto shadow-lg">
+          {/* Left Stats Pill - Hidden on very small screens */}
+          <div className="hidden md:block bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-xl p-4 min-w-[200px] pointer-events-auto shadow-lg">
             <div className="text-xs text-[#94a3b8] mb-1 font-mono uppercase tracking-wider flex items-center gap-2">
               Repository
               {isCached && <span className="bg-[#7c3aed]/20 text-[#7c3aed] px-1.5 py-0.5 rounded text-[10px]">CACHED</span>}
@@ -324,28 +337,26 @@ export default function ShareableGraphView() {
               </div>
             </div>
           </div>
+          
+          {/* Mobile specific top pill */}
+          <div className="md:hidden bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-3 py-1.5 pointer-events-auto shadow-lg flex items-center gap-2">
+            <span className="text-white text-xs font-mono font-medium truncate max-w-[120px]">{repo}</span>
+            {isCached && <span className="bg-[#7c3aed]/20 text-[#7c3aed] px-1 py-0.5 rounded text-[9px]">CACHED</span>}
+          </div>
 
           {/* Right Action Buttons */}
-          <div className="flex gap-2 pointer-events-auto">
-            {!sidebarVisible && (
-              <button
-                onClick={() => setSidebarVisible(true)}
-                className="bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-4 py-1.5 text-xs font-mono text-white hover:bg-[#1e1e2e] transition shadow-lg mr-2"
-              >
-                Show Files (Cmd+B)
-              </button>
-            )}
+          <div className="flex gap-2 pointer-events-auto items-center">
             <button
               onClick={handleShare}
-              className="bg-[#111118]/80 backdrop-blur border border-[#7c3aed]/40 rounded-full px-4 py-1.5 text-xs font-mono text-[#7c3aed] hover:bg-[#7c3aed]/10 transition flex items-center gap-1.5 shadow-lg"
+              className="bg-[#111118]/80 backdrop-blur border border-[#7c3aed]/40 rounded-full px-3 md:px-4 py-1.5 text-[10px] md:text-xs font-mono text-[#7c3aed] hover:bg-[#7c3aed]/10 transition flex items-center gap-1.5 shadow-lg"
             >
               {copied ? 'Copied!' : 'Share'}
             </button>
             <button
               onClick={() => navigate('/')}
-              className="bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-4 py-1.5 text-xs font-mono text-white hover:bg-[#1e1e2e] transition shadow-lg"
+              className="bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-3 md:px-4 py-1.5 text-[10px] md:text-xs font-mono text-white hover:bg-[#1e1e2e] transition shadow-lg"
             >
-              New repo
+              New
             </button>
           </div>
         </div>
@@ -368,6 +379,23 @@ export default function ShareableGraphView() {
             commitSha={graphData?.commit_sha}
           />
         )}
+
+        {/* Mobile Floating Action Buttons for Drawers */}
+        <div className="md:hidden absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 z-30 pointer-events-auto bg-[#111118]/90 backdrop-blur p-1.5 rounded-full border border-[#1e1e2e]/50 shadow-2xl">
+          <button 
+            onClick={() => setSidebarVisible(true)}
+            className="px-4 py-2 rounded-full text-xs font-mono font-medium text-white hover:bg-[#1e1e2e] transition-colors"
+          >
+            ≡ Files
+          </button>
+          <div className="w-px h-6 bg-[#1e1e2e]/50" />
+          <button 
+            onClick={() => setChatVisible(true)}
+            className="px-4 py-2 rounded-full text-xs font-mono font-medium text-white hover:bg-[#1e1e2e] transition-colors"
+          >
+            ✦ AI Chat
+          </button>
+        </div>
       </div>
       
       {/* Right Sidebar - Health & Chat */}
@@ -381,6 +409,8 @@ export default function ShareableGraphView() {
         onBlastRadiusChange={setBlastRadius}
         onSimulationModeChange={setSimulationMode}
         simulationSourceFile={simulationSourceFile}
+        hidden={!chatVisible}
+        onClose={() => setChatVisible(false)}
       />
     </div>
   );

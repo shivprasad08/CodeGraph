@@ -221,6 +221,7 @@ export default function FileTree({
   selectedFilePath, 
   selectedNodeId,
   hidden,
+  onClose,
   dirColorMap
 }) {
   const [sidebarWidth, setSidebarWidth] = useState(260);
@@ -316,10 +317,16 @@ export default function FileTree({
   const classNodes = graph?.nodes?.filter(n => n.type === "class") || [];
 
   return (
-    <div 
-      style={{ width: `${sidebarWidth}px` }} 
-      className={`relative flex-shrink-0 h-full bg-bg border-r border-border flex flex-col ${hidden ? 'hidden' : ''}`}
-    >
+    <>
+      {/* Mobile Backdrop */}
+      <div 
+        className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-300 ${hidden ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+        onClick={onClose}
+      />
+      <div 
+        style={{ width: `${sidebarWidth}px` }} 
+        className={`fixed md:relative inset-y-0 left-0 z-50 flex-shrink-0 h-full bg-bg border-r border-border flex flex-col transition-transform duration-300 md:transition-none max-w-[85vw] ${hidden ? 'max-md:-translate-x-full md:hidden' : 'translate-x-0'}`}
+      >
       {/* Header */}
       <div className="h-12 flex-shrink-0 bg-surface border-b border-border px-3 flex items-center justify-between">
         <span className="text-[10px] font-mono text-muted uppercase tracking-widest select-none">
@@ -405,9 +412,9 @@ export default function FileTree({
         </span>
       </div>
 
-      {/* Resize Handle */}
+      {/* Resize Handle - Hidden on mobile */}
       <div 
-        className="absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
+        className="hidden md:block absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
         onMouseDown={() => setIsResizing(true)}
       />
 
@@ -439,6 +446,7 @@ export default function FileTree({
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
