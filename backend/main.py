@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from starlette.middleware.base import BaseHTTPMiddleware
+import httpx
 
 import ingestion
 import parser
@@ -468,47 +469,40 @@ async def get_analysis(job_id: str):
     )
 
 
-@app.get("/source/{job_id}/{file_path:path}")
-async def get_file_source(job_id: str, file_path: str):
+@app.get("/source/{owner}/{repo}/{commit_sha}/{file_path:path}")
+async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str):
     """
-    Returns the raw source content of a file from an analyzed job.
-    File content is stored in the job's parse output during pipeline.
+    Returns the raw source content of a file fetched dynamically from GitHub.
     """
-    if job_id not in jobs:
-        raise HTTPException(404, "Job not found")
-    
-    job = jobs[job_id]
-    if job["status"] != "done":
-        raise HTTPException(202, "Analysis not complete")
-    
-    # Source is stored in job["source_files"]
-    source_files = job.get("source_files", {})
-    if file_path not in source_files:
-        raise HTTPException(404, f"File not found: {file_path}")
-    
-    return JSONResponse({
-        "path": file_path,
-        "content": source_files[file_path],
-        "language": "python"
-    })
+    url = f"https://raw.githubusercontent.com/{owner}/{repo}/{commit_sha}/{file_path}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            raise HTTPException(404, "File not found on GitHub")
+        return JSONResponse({
+            "path": file_path,
+            "content": resp.text,
+            "language": "python"
+        })
 
 
-@app.get("/chat/{job_id}/suggestions")
-async def get_suggestions(job_id: str):
-    if job_id not in jobs or jobs[job_id]["status"] != "done":
-        raise HTTPException(404, "Job not found or not complete")
-    graph = jobs[job_id]["graph"]
+@app.get("/chat/{owner}/{repo}/{commit_sha}/suggestions")
+async def get_suggestions(owner: str, repo: str, commit_sha: str):
+    graph = cache.read_cache(f"{owner}/{repo}", commit_sha)
+    if not graph:
+        raise HTTPException(404, "Graph data not found in cache")
     return { "suggestions": chat.generate_suggestions(graph) }
 
 
-@app.post("/chat/{job_id}")
-async def chat_with_repo(job_id: str, request: Request):
+@app.post("/chat/{owner}/{repo}/{commit_sha}")
+async def chat_with_repo(owner: str, repo: str, commit_sha: str, request: Request):
     """
     Accepts a user question and conversation history.
     Returns a streamed AI response grounded in the repo's graph data.
     """
-    if job_id not in jobs or jobs[job_id]["status"] != "done":
-        raise HTTPException(404, "Job not found or not complete")
+    graph = cache.read_cache(f"{owner}/{repo}", commit_sha)
+    if not graph:
+        raise HTTPException(404, "Graph data not found in cache. Please re-analyze the repo.")
         
     try:
         body = await request.json()
@@ -522,21 +516,26 @@ async def chat_with_repo(job_id: str, request: Request):
         raise HTTPException(400, "Message cannot be empty")
         
     # Rate Limiting
-    counts = chat_message_counts.get(job_id, [])
+    ip = request.headers.get("X-Forwarded-For")
+    if not ip:
+        ip = request.client.host if request.client else "unknown"
+    else:
+        ip = ip.split(",")[0].strip()
+        
+    rate_key = f"chat_{ip}"
+    counts = chat_message_counts.get(rate_key, [])
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
     counts = [t for t in counts if t > one_hour_ago]
     
     if len(counts) >= 20:
-        chat_message_counts[job_id] = counts
+        chat_message_counts[rate_key] = counts
         raise HTTPException(429, "Chat limit reached. Max 20 messages per hour.")
         
     counts.append(datetime.now(timezone.utc))
-    chat_message_counts[job_id] = counts
-    
-    graph = jobs[job_id]["graph"]
+    chat_message_counts[rate_key] = counts
     
     return StreamingResponse(
-        chat.stream_chat_response(job_id, graph, message, history),
+        chat.stream_chat_response(f"{owner}/{repo}", graph, message, history),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -544,16 +543,15 @@ async def chat_with_repo(job_id: str, request: Request):
         }
     )
 
-@app.post("/impact/{job_id}")
-async def analyze_impact(job_id: str, request: Request, body: ImpactRequest):
+@app.post("/impact/{owner}/{repo}/{commit_sha}")
+async def analyze_impact(owner: str, repo: str, commit_sha: str, request: Request, body: ImpactRequest):
     """
     Given a changed file/function and blast radius data,
     returns a streaming LLM analysis of the impact.
     """
-    if job_id not in jobs or jobs[job_id]["status"] != "done":
-        raise HTTPException(404, "Job not found or not complete")
-        
-    graph = jobs[job_id]["graph"]
+    graph = cache.read_cache(f"{owner}/{repo}", commit_sha)
+    if not graph:
+        raise HTTPException(404, "Graph data not found in cache")
     
     # Simple rate limit logic similar to chat
     ip = request.headers.get("X-Forwarded-For")

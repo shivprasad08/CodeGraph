@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { streamChatMessage, fetchChatSuggestions } from '../api';
 
-export default function ChatSidebar({ jobId, graph, onNodeHighlight, onNodeClick }) {
+export default function ChatSidebar({ graph, onNodeHighlight, onNodeClick }) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -16,10 +16,10 @@ export default function ChatSidebar({ jobId, graph, onNodeHighlight, onNodeClick
 
   // Fetch suggestions on mount
   useEffect(() => {
-    if (jobId) {
-      fetchChatSuggestions(jobId).then(setSuggestions);
+    if (graph?.repo && graph?.commit_sha) {
+      fetchChatSuggestions(graph.repo, graph.commit_sha).then(setSuggestions);
     }
-  }, [jobId]);
+  }, [graph?.repo, graph?.commit_sha]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -83,7 +83,8 @@ export default function ChatSidebar({ jobId, graph, onNodeHighlight, onNodeClick
     tokenQueue.current = [];
 
     streamChatMessage(
-      jobId,
+      graph?.repo,
+      graph?.commit_sha,
       text,
       history,
       // onToken

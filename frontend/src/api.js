@@ -81,15 +81,15 @@ export async function fetchRepoMeta(owner, repo) {
   return response.json();
 }
 
-export async function fetchFileSource(jobId, filePath) {
+export async function fetchFileSource(repoFullName, commitSha, filePath) {
   const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
-  const res = await fetch(`${BASE_URL}/source/${jobId}/${encodedPath}`);
+  const res = await fetch(`${BASE_URL}/source/${repoFullName}/${commitSha}/${encodedPath}`);
   if (!res.ok) throw new Error(`Failed to fetch source: ${res.status}`);
   return res.json();
 }
 
-export function streamChatMessage(jobId, message, history, onToken, onDone, onError) {
-  fetch(`${BASE_URL}/chat/${jobId}`, {
+export function streamChatMessage(repoFullName, commitSha, message, history, onToken, onDone, onError) {
+  fetch(`${BASE_URL}/chat/${repoFullName}/${commitSha}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, history })
@@ -132,9 +132,9 @@ export function streamChatMessage(jobId, message, history, onToken, onDone, onEr
   .catch(err => onError(err.message));
 }
 
-export async function fetchChatSuggestions(jobId) {
+export async function fetchChatSuggestions(repoFullName, commitSha) {
   try {
-    const res = await fetch(`${BASE_URL}/chat/${jobId}/suggestions`);
+    const res = await fetch(`${BASE_URL}/chat/${repoFullName}/${commitSha}/suggestions`);
     if (!res.ok) return [];
     const data = await res.json();
     return data.suggestions || [];
@@ -150,10 +150,10 @@ export async function fetchAnalysis(jobId) {
 }
 
 export function streamImpactAnalysis(
-  jobId, sourceNodeId, changeDescription, blastRadiusData,
+  repoFullName, commitSha, sourceNodeId, changeDescription, blastRadiusData,
   onToken, onDone, onError
 ) {
-  fetch(`${BASE_URL}/impact/${jobId}`, {
+  fetch(`${BASE_URL}/impact/${repoFullName}/${commitSha}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

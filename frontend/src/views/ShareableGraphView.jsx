@@ -358,7 +358,6 @@ export default function ShareableGraphView() {
 
         {inspectorVisible && (
           <CodeInspector
-            jobId={jobId}
             filePath={inspectorFilePath}
             graph={graphData}
             selectedNodeId={selectedNode?.id ?? null}

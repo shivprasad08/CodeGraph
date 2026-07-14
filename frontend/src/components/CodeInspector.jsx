@@ -6,7 +6,6 @@ import { fetchFileSource } from '../api';
 hljs.registerLanguage('python', python);
 
 export default function CodeInspector({ 
-  jobId, 
   filePath, 
   graph, 
   selectedNodeId, 
@@ -49,7 +48,7 @@ export default function CodeInspector({
   // Fetch Source
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!filePath || !jobId) return;
+    if (!filePath || !repo || !commitSha) return;
     
     let isMounted = true;
     const loadSource = async () => {
@@ -58,7 +57,7 @@ export default function CodeInspector({
       setSourceCode("");
       
       try {
-        const res = await fetchFileSource(jobId, filePath);
+        const res = await fetchFileSource(repo, commitSha, filePath);
         if (isMounted) {
           setSourceCode(res.content || "");
         }
@@ -75,7 +74,7 @@ export default function CodeInspector({
     
     loadSource();
     return () => { isMounted = false; };
-  }, [filePath, jobId]);
+  }, [filePath, repo, commitSha]);
 
   // ---------------------------------------------------------------------------
   // Graph Cross-referencing
