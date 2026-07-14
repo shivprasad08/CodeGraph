@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env.VITE_API_URL || "";
+const BASE_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 
 export async function analyzeRepo(repoUrl) {
   const response = await fetch(`${BASE_URL}/analyze`, {
