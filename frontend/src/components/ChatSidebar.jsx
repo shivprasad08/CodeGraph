@@ -95,6 +95,7 @@ export default function ChatSidebar({ graph, onNodeHighlight, onNodeClick }) {
       },
       // onDone
       (nodeIds) => {
+        setIsLoading(false);
         setIsStreaming(false);
         setMessages(prev => prev.map(m =>
           m.id === assistantMsg.id ? { ...m, nodes: nodeIds } : m

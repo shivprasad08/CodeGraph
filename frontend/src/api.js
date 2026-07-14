@@ -117,6 +117,9 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
           try {
             const data = JSON.parse(line.slice(6));
             if (data.done) {
+              if (data.token) {
+                onToken(data.token);
+              }
               onDone(data.nodes || []);
             } else {
               onToken(data.token);
