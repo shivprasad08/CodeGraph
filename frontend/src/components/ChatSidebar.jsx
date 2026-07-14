@@ -97,9 +97,22 @@ export default function ChatSidebar({ graph, onNodeHighlight, onNodeClick }) {
       (nodeIds) => {
         setIsLoading(false);
         setIsStreaming(false);
-        setMessages(prev => prev.map(m =>
-          m.id === assistantMsg.id ? { ...m, nodes: nodeIds } : m
-        ));
+        
+        const remainingTokens = tokenQueue.current.join("");
+        tokenQueue.current = [];
+        
+        setMessages(prev => {
+          const newMsgs = [...prev];
+          const last = newMsgs[newMsgs.length - 1];
+          if (last && last.role === 'assistant') {
+            last.nodes = nodeIds;
+            if (remainingTokens) {
+              last.content += remainingTokens;
+            }
+          }
+          return newMsgs;
+        });
+        
         if (nodeIds.length > 0) {
           onNodeHighlight(nodeIds);
         }
