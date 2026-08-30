@@ -1,0 +1,58 @@
+---
+- hosts: web
+  become: true
+  vars_files:
+    - secrets.yml
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install prerequisites
+      apt:
+        name: ["apt-transport-https", "ca-certificates", "curl", "software-properties-common", "git"]
+        state: present
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker repo
+      apt_repository:
+        repo: "deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+
+    - name: Install Docker + Compose plugin
+      apt:
+        name: ["docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin"]
+        state: present
+        update_cache: yes
+
+    - name: Add ssh user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Clone CodeGraph repo
+      git:
+        repo: "https://github.com/shivprasad08/CodeGraph.git"
+        dest: "/home/{{ ansible_user }}/CodeGraph"
+        force: yes
+
+    - name: Write .env file for docker compose
+      copy:
+        dest: "/home/{{ ansible_user }}/CodeGraph/.env"
+        content: |
+          GITHUB_TOKEN={{ github_token }}
+          GROQ_API_KEY={{ groq_api_key }}
+          MISTRAL_API_KEY={{ mistral_api_key }}
+          VITE_API_URL={{ vite_api_url }}
+        mode: '0600'
+
+    - name: Build and start the stack
+      command: docker compose up -d --build
+      args:
+        chdir: "/home/{{ ansible_user }}/CodeGraph"
