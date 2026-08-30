@@ -5,5 +5,5 @@
     "ghcr.io/devcontainers/features/terraform:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {}
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ansible && curl https://sdk.cloud.google.com | bash > /dev/null"
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ansible && export CLOUDSDK_CORE_DISABLE_PROMPTS=1 && curl -sSL https://sdk.cloud.google.com | CLOUDSDK_CORE_DISABLE_PROMPTS=1 bash && echo 'source /home/vscode/google-cloud-sdk/path.bash.inc' >> ~/.bashrc"
 }
