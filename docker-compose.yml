@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - MAX_FILES=60
+      - CACHE_DIR=/app/cache
+    volumes:
+      - backend-cache:/app/cache
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend-cache:

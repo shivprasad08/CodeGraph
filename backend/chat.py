@@ -139,7 +139,7 @@ async def stream_chat_response(job_id: str, graph: dict, message: str, history: 
     
     try:
         stream = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=messages,
             max_tokens=600,
             temperature=0.3,    # low temperature = more factual, less creative

@@ -35,6 +35,12 @@ export default function LandingPageView() {
     <div className="min-h-screen bg-[#0a0a0f] text-white overflow-x-hidden font-sans">
       {/* Section 1 - Hero with interactive particle canvas */}
       <Hero onAnalyze={handleAnalyze} />
+      
+      {error && (
+        <div className="max-w-2xl mx-auto px-4 -mt-8 mb-8 relative z-20 text-center text-red-400 font-mono bg-red-900/20 py-3 rounded-xl border border-red-500/30">
+          {error}
+        </div>
+      )}
 
       {/* Section 2 - Demo Gallery */}
       <DemoGallery />

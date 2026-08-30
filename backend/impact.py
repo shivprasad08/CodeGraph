@@ -104,7 +104,7 @@ async def stream_impact_analysis(job_id: str, graph: dict, source_node: dict, ch
     
     try:
         stream = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=messages,
             max_tokens=800,
             temperature=0.2,
