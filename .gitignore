@@ -30,6 +30,16 @@ cache/
 # Terraform / Ansible
 terraform/.terraform/
 terraform/*.tfstate
-terraform/*.tfstate.backup
+terraform/*.tfstate.*
 terraform/terraform.tfvars
+terraform/crash.log
 ansible/secrets.yml
+ansible/inventory.ini
+*.retry
+
+# SSH keys / credentials
+*.pem
+*.key
+# AWS CLI installer
+aws/
+awscliv2.zip

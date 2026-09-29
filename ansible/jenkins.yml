@@ -1,0 +1,44 @@
+---
+- hosts: web
+  become: true
+  tasks:
+    - name: Install Java 21 (Jenkins requirement)
+      apt:
+        name: openjdk-21-jre
+        state: present
+        update_cache: yes
+
+    - name: Set Java 21 as default
+      alternatives:
+        name: java
+        path: /usr/lib/jvm/java-21-openjdk-amd64/bin/java
+
+    - name: Fetch current Jenkins signing key from keyserver
+      shell: |
+        gpg --no-default-keyring --keyring /usr/share/keyrings/jenkins-keyring.gpg --keyserver keyserver.ubuntu.com --recv-keys 7198F4B714ABFC68
+      args:
+        creates: /usr/share/keyrings/jenkins-keyring.gpg
+
+    - name: Add Jenkins repo
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/"
+        state: present
+        filename: jenkins
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Add jenkins user to docker group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Restart and enable Jenkins
+      systemd:
+        name: jenkins
+        state: restarted
+        enabled: yes

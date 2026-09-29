@@ -1,0 +1,82 @@
+---
+- name: Deploy CodeGraph on AWS EC2
+  hosts: codegraph
+  become: true
+
+  vars:
+    repo_url: "https://github.com/shivprasad08/CodeGraph.git"
+    repo_branch: "main"
+    app_dir: /opt/codegraph
+    swap_size_mb: 2048
+
+  tasks:
+    - name: Update apt cache and install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create swap file (protects the frontend build from OOM)
+      ansible.builtin.shell: |
+        fallocate -l {{ swap_size_mb }}M /swapfile
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      args:
+        creates: /swapfile
+
+    - name: Install Docker Engine + Compose plugin
+      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
+      args:
+        creates: /usr/bin/docker
+
+    - name: Ensure Docker is running and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ubuntu user to the docker group
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    - name: Clone / update the CodeGraph repository
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ app_dir }}"
+        version: "{{ repo_branch }}"
+        force: true
+
+    - name: Render .env file
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ app_dir }}/.env"
+        mode: "0600"
+
+    - name: Build and start containers
+      ansible.builtin.command: docker compose up -d --build
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Wait for backend port
+      ansible.builtin.wait_for:
+        port: 8000
+        timeout: 180
+
+    - name: Wait for frontend port
+      ansible.builtin.wait_for:
+        port: 80
+        timeout: 60
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg:
+          - "Frontend: http://{{ ansible_host }}"
+          - "Backend:  http://{{ ansible_host }}:8000"

@@ -1,20 +1,21 @@
 FROM python:3.11-slim
 
-# Install system dependencies (gcc for tree-sitter C extensions)
-RUN apt-get update && apt-get install -y gcc && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install Python dependencies
+# git is needed to clone repositories for analysis; build-essential for tree-sitter fallbacks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
-
-# Ensure the cache directory exists and has correct permissions
-RUN mkdir -p /app/cache
 
 EXPOSE 8000
 
+# ADJUST "main:app" to your FastAPI entrypoint (e.g. app.main:app)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
