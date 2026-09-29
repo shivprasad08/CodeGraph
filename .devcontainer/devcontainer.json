@@ -5,5 +5,5 @@
     "ghcr.io/devcontainers/features/terraform:1": {},
     "ghcr.io/devcontainers/features/docker-in-docker:2": {}
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ansible && export CLOUDSDK_CORE_DISABLE_PROMPTS=1 && curl -sSL https://sdk.cloud.google.com | CLOUDSDK_CORE_DISABLE_PROMPTS=1 bash && echo 'source /home/vscode/google-cloud-sdk/path.bash.inc' >> ~/.bashrc"
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y ansible unzip && curl -sSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip && unzip -q -o /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install --update"
 }
