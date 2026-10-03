@@ -75,6 +75,35 @@ npm run dev
 
 Navigate to `http://localhost:5173/` in your browser. Paste a GitHub repository URL and click **Analyze Repo**.
 
+## ☁️ AWS deployment with Jenkins
+
+Terraform creates the AWS EC2 instance and writes the Ansible inventory to
+`ansible/inventory.ini`:
+
+```bash
+cd terraform
+terraform init
+terraform apply
+```
+
+The inventory is intentionally ignored by Git because it contains the generated
+host address and local SSH key path. Jenkins must run on a node that has this
+inventory available in its workspace, or the inventory must be restored there
+before the pipeline starts.
+
+The Jenkins pipeline deploys through `ansible/playbook.yml`. Create these
+credentials in Jenkins before running it:
+
+- `codegraph-aws-ssh`: SSH private key matching the Terraform key pair
+- `codegraph-github-token`: GitHub personal access token
+- `codegraph-groq-api-key`: Groq API key
+- `codegraph-mistral-api-key`: Mistral API key
+
+The Jenkins host can be provisioned with `ansible/jenkins.yml`; it installs the
+Ansible command-line tools required by the pipeline. The pipeline validates the
+inventory and playbook, deploys the stack to the AWS EC2 host, and verifies the
+remote Docker Compose services.
+
 ## 🧠 How it Works
 1. **Ingestion:** Downloads the target repository structure from the GitHub API.
 2. **Parsing:** Extracts functions, classes, docstrings, parameters, and dependencies using tree-sitter.

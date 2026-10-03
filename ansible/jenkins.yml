@@ -4,7 +4,9 @@
   tasks:
     - name: Install Java 21 (Jenkins requirement)
       apt:
-        name: openjdk-21-jre
+        name:
+          - ansible
+          - openjdk-21-jre
         state: present
         update_cache: yes
 
