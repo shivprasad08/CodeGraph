@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codegraph-backend-svc
+  namespace: codegraph
+spec:
+  type: ClusterIP
+  selector:
+    app: codegraph-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+# ClusterIP is correct because the backend should only be reachable inside the
+# cluster, through codegraph-backend-svc.codegraph.svc.cluster.local, rather
+# than directly from the internet.

@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codegraph-frontend
+  namespace: codegraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: codegraph-frontend
+  template:
+    metadata:
+      labels:
+        app: codegraph-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: codegraph-frontend:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: "0.1"
+            limits:
+              memory: 256Mi
+              cpu: "0.25"

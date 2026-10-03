@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: codegraph-cache-pvc
+  namespace: codegraph
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: codegraph-hostpath
+  resources:
+    requests:
+      storage: 1Gi
+  volumeName: codegraph-cache-pv

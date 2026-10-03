@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codegraph-backend
+  namespace: codegraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: codegraph-backend
+  template:
+    metadata:
+      labels:
+        app: codegraph-backend
+    spec:
+      containers:
+        - name: backend
+          image: codegraph-backend:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: codegraph-config
+            - secretRef:
+                name: codegraph-secrets
+          volumeMounts:
+            - name: cache
+              mountPath: /app/cache
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: "0.25"
+            limits:
+              memory: 512Mi
+              cpu: "0.5"
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: codegraph-cache-pvc

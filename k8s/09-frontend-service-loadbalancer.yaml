@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: codegraph-frontend-lb
+  namespace: codegraph
+spec:
+  type: LoadBalancer
+  selector:
+    app: codegraph-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP
+# This demonstrates LoadBalancer syntax. Without a cloud load balancer
+# controller, EXTERNAL-IP may remain Pending indefinitely. Actual provisioning
+# requires a cloud integration such as AWS EKS + ALB or GKE. k3s includes the
+# klipper load balancer, which may instead assign the node's own IP.

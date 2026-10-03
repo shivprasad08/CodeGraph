@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codegraph-config
+  namespace: codegraph
+data:
+  MAX_FILES: "60"
+  CACHE_DIR: /app/cache
+  # Replace this placeholder with the real EC2 public IP before applying.
+  VITE_API_URL: "http://3.6.49.157:8000"
