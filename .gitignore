@@ -43,3 +43,5 @@ ansible/inventory.ini
 # AWS CLI installer
 aws/
 awscliv2.zip
+k8s/02-secret.yaml
+k8s/02-secret.yaml
