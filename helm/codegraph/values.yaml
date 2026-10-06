@@ -1,0 +1,21 @@
+namespace: codegraph
+
+backend:
+  image: codegraph-backend:latest
+  replicas: 1
+  port: 8000
+
+frontend:
+  image: codegraph-frontend:latest
+  replicas: 1
+  port: 80
+  nodePort: 30081
+
+config:
+  maxFiles: "60"
+  cacheDir: "/app/cache"
+
+secrets:
+  githubToken: ""
+  groqApiKey: ""
+  mistralApiKey: ""

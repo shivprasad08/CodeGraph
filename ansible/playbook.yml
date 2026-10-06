@@ -1,7 +1,10 @@
 ---
-- name: Deploy CodeGraph on AWS EC2
+- name: Provision and deploy CodeGraph on AWS EC2
   hosts: codegraph
   become: true
+
+  vars_files:
+    - secrets.yml
 
   vars:
     repo_url: "https://github.com/shivprasad08/CodeGraph.git"
@@ -10,17 +13,27 @@
     swap_size_mb: 2048
 
   tasks:
+
+    # ==================================================
+    # 1. Base packages
+    # ==================================================
+
     - name: Update apt cache and install base packages
       ansible.builtin.apt:
         name:
           - ca-certificates
           - curl
           - git
+          - python3
         state: present
         update_cache: true
         cache_valid_time: 3600
 
-    - name: Create swap file (protects the frontend build from OOM)
+    # ==================================================
+    # 2. Swap
+    # ==================================================
+
+    - name: Create swap file
       ansible.builtin.shell: |
         fallocate -l {{ swap_size_mb }}M /swapfile
         chmod 600 /swapfile
@@ -30,53 +43,268 @@
       args:
         creates: /swapfile
 
-    - name: Install Docker Engine + Compose plugin
-      ansible.builtin.shell: curl -fsSL https://get.docker.com | sh
-      args:
-        creates: /usr/bin/docker
+    # ==================================================
+    # 3. Docker
+    # ==================================================
 
-    - name: Ensure Docker is running and enabled
-      ansible.builtin.service:
+    - name: Check if Docker is installed
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Docker
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com | sh
+      when: docker_check.rc != 0
+
+    - name: Ensure Docker service is running
+      ansible.builtin.systemd:
         name: docker
         state: started
         enabled: true
 
-    - name: Add ubuntu user to the docker group
-      ansible.builtin.user:
-        name: ubuntu
-        groups: docker
-        append: true
+    - name: Display Docker version
+      ansible.builtin.command:
+        cmd: docker --version
+      register: docker_version
+      changed_when: false
 
-    - name: Clone / update the CodeGraph repository
+    - name: Show Docker version
+      ansible.builtin.debug:
+        msg: "{{ docker_version.stdout }}"
+
+    # ==================================================
+    # 4. K3s
+    # ==================================================
+
+    - name: Check if K3s is already installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Install K3s
+      ansible.builtin.shell: |
+        curl -sfL https://get.k3s.io | sh -
+      when: not k3s_binary.stat.exists
+
+    - name: Ensure K3s is running
+      ansible.builtin.systemd:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Wait for Kubernetes API
+      ansible.builtin.command:
+        cmd: k3s kubectl get nodes
+      register: k3s_ready
+      retries: 12
+      delay: 5
+      until: k3s_ready.rc == 0
+      changed_when: false
+
+    # ==================================================
+    # 5. Helm
+    # ==================================================
+
+    - name: Check if Helm is installed
+      ansible.builtin.command:
+        cmd: helm version
+      register: helm_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Helm
+      ansible.builtin.shell: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      when: helm_check.rc != 0
+
+    # ==================================================
+    # 6. Clone / update CodeGraph
+    # ==================================================
+
+    - name: Clone / update CodeGraph repository
       ansible.builtin.git:
         repo: "{{ repo_url }}"
         dest: "{{ app_dir }}"
         version: "{{ repo_branch }}"
         force: true
 
-    - name: Render .env file
-      ansible.builtin.template:
-        src: env.j2
-        dest: "{{ app_dir }}/.env"
-        mode: "0600"
+    # ==================================================
+    # 7. Build Docker images
+    # ==================================================
 
-    - name: Build and start containers
-      ansible.builtin.command: docker compose up -d --build
-      args:
+    - name: Build CodeGraph backend Docker image
+      ansible.builtin.command:
+        cmd: docker build -t codegraph-backend:latest ./backend
         chdir: "{{ app_dir }}"
 
-    - name: Wait for backend port
-      ansible.builtin.wait_for:
-        port: 8000
-        timeout: 180
+    - name: Build CodeGraph frontend Docker image
+      ansible.builtin.command:
+        cmd: docker build -t codegraph-frontend:latest ./frontend
+        chdir: "{{ app_dir }}"
 
-    - name: Wait for frontend port
-      ansible.builtin.wait_for:
-        port: 80
-        timeout: 60
+    # ==================================================
+    # 8. Display Docker images
+    # ==================================================
 
-    - name: Show result
+    - name: Show CodeGraph Docker images
+      ansible.builtin.command:
+        cmd: docker images
+      register: docker_images
+      changed_when: false
+
+    - name: Display Docker images
+      ansible.builtin.debug:
+        var: docker_images.stdout_lines
+
+    # ==================================================
+    # 9. Import Docker images into K3s containerd
+    # ==================================================
+
+    - name: Import backend image into K3s
+      ansible.builtin.shell: |
+        docker save codegraph-backend:latest | k3s ctr images import -
+      args:
+        executable: /bin/bash
+
+    - name: Import frontend image into K3s
+      ansible.builtin.shell: |
+        docker save codegraph-frontend:latest | k3s ctr images import -
+      args:
+        executable: /bin/bash
+
+    # ==================================================
+    # 10. Create temporary Helm values containing secrets
+    # ==================================================
+
+    - name: Create temporary Helm values file
+      ansible.builtin.copy:
+        dest: /tmp/codegraph-values.yaml
+        mode: "0600"
+        content: |
+          namespace: codegraph
+
+          backend:
+            image: codegraph-backend:latest
+            replicas: 1
+            port: 8000
+
+          frontend:
+            image: codegraph-frontend:latest
+            replicas: 1
+            port: 80
+            nodePort: 30081
+
+          config:
+            maxFiles: "60"
+            cacheDir: "/app/cache"
+
+          secrets:
+            githubToken: {{ github_token | to_json }}
+            groqApiKey: {{ groq_api_key | to_json }}
+            mistralApiKey: {{ mistral_api_key | to_json }}
+
+    # ==================================================
+    # 11. Deploy with Helm
+    # ==================================================
+
+    - name: Deploy CodeGraph using Helm
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - codegraph
+          - "{{ app_dir }}/helm/codegraph"
+          - --namespace
+          - codegraph
+          - --create-namespace
+          - --values
+          - /tmp/codegraph-values.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    # ==================================================
+    # 12. Wait for deployments
+    # ==================================================
+
+    - name: Wait for backend rollout
+      ansible.builtin.command:
+        cmd: >
+          k3s kubectl rollout status
+          deployment/codegraph-backend
+          -n codegraph
+          --timeout=180s
+      changed_when: false
+
+    - name: Wait for frontend rollout
+      ansible.builtin.command:
+        cmd: >
+          k3s kubectl rollout status
+          deployment/codegraph-frontend
+          -n codegraph
+          --timeout=180s
+      changed_when: false
+
+    # ==================================================
+    # 13. Show Kubernetes resources
+    # ==================================================
+
+    - name: Get Kubernetes pods
+      ansible.builtin.command:
+        cmd: k3s kubectl get pods -n codegraph
+      register: pods
+      changed_when: false
+
+    - name: Get Kubernetes services
+      ansible.builtin.command:
+        cmd: k3s kubectl get svc -n codegraph
+      register: services
+      changed_when: false
+
+    - name: Get Helm releases
+      ansible.builtin.command:
+        cmd: helm list -n codegraph
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: helm_releases
+      changed_when: false
+
+    - name: Display Kubernetes pods
+      ansible.builtin.debug:
+        var: pods.stdout_lines
+
+    - name: Display Kubernetes services
+      ansible.builtin.debug:
+        var: services.stdout_lines
+
+    - name: Display Helm release
+      ansible.builtin.debug:
+        var: helm_releases.stdout_lines
+
+    # ==================================================
+    # 14. Cleanup temporary secrets
+    # ==================================================
+
+    - name: Remove temporary Helm values file
+      ansible.builtin.file:
+        path: /tmp/codegraph-values.yaml
+        state: absent
+
+    # ==================================================
+    # 15. Completion
+    # ==================================================
+
+    - name: Deployment complete
       ansible.builtin.debug:
         msg:
-          - "Frontend: http://{{ ansible_host }}"
-          - "Backend:  http://{{ ansible_host }}:8000"
+          - "=========================================="
+          - "CodeGraph deployment completed!"
+          - "=========================================="
+          - "Frontend: http://{{ ansible_host }}:30081"
+          - "Backend: internal ClusterIP service on port 8000"
+          - "Docker images: codegraph-backend, codegraph-frontend"
+          - "K3s cluster: running"
+          - "Helm release: codegraph"

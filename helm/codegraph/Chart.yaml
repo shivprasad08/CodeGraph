@@ -1,0 +1,5 @@
+apiVersion: v2
+name: codegraph
+description: Helm chart for CodeGraph - AI-powered GitHub repository analyzer
+version: 0.1.0
+appVersion: "1.0"
