@@ -129,6 +129,28 @@ pipeline {
                 '''
             }
         }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Deploying CodeGraph to Kubernetes..."
+
+                    export HOME=/var/lib/jenkins
+
+                    helm upgrade --install codegraph \
+                        "$WORKSPACE/helm/codegraph" \
+                        --namespace codegraph \
+                        --set backend.image=localhost:5000/codegraph-backend:${BUILD_NUMBER} \
+                        --set frontend.image=localhost:5000/codegraph-frontend:${BUILD_NUMBER} \
+                        --wait \
+                        --timeout 5m
+
+                    echo "Helm deployment completed."
+                '''
+            }
+        }
     }
 
     post {
