@@ -16,10 +16,19 @@ from mistralai.async_client import MistralAsyncClient
 from mistralai.models.chat_completion import ChatMessage
 
 # ---------------------------------------------------------------------------
-# Module-level LLM clients (initialized once)
+# Module-level LLM clients (initialized once when API keys are available)
 # ---------------------------------------------------------------------------
-groq_client = AsyncGroq(api_key=config.GROQ_API_KEY)
-mistral_client = MistralAsyncClient(api_key=config.MISTRAL_API_KEY)
+groq_client = (
+    AsyncGroq(api_key=config.GROQ_API_KEY)
+    if config.GROQ_API_KEY
+    else None
+)
+
+mistral_client = (
+    MistralAsyncClient(api_key=config.MISTRAL_API_KEY)
+    if config.MISTRAL_API_KEY
+    else None
+)
 
 GROQ_MODEL = "openai/gpt-oss-120b"
 MISTRAL_MODEL = "mistral-small-latest"
@@ -137,6 +146,9 @@ async def _call_groq(prompt: str, system: str) -> str:
     Raises groq.RateLimitError on 429.
     Raises RuntimeError on any other failure.
     """
+    if groq_client is None:
+        raise RuntimeError("GROQ_API_KEY is not configured")
+
     try:
         response = await groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -159,6 +171,9 @@ async def _call_mistral(prompt: str, system: str) -> str:
     Calls Mistral API. Returns raw response text.
     Raises RuntimeError on any failure.
     """
+    if mistral_client is None:
+        raise RuntimeError("MISTRAL_API_KEY is not configured")
+
     try:
         response = await mistral_client.chat(
             model=MISTRAL_MODEL,
