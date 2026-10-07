@@ -122,9 +122,11 @@ async def fetch_repo(repo_url: str) -> dict:
     owner, repo = await _parse_url(repo_url)
     
     headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json"
+    "Accept": "application/vnd.github.v3+json"
     }
+
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     
     async with httpx.AsyncClient(headers=headers) as client:
         branch, sha = await _get_default_branch_and_sha(owner, repo, client)
