@@ -12,8 +12,7 @@ import re
 
 import config
 from groq import AsyncGroq, RateLimitError
-from mistralai.async_client import MistralAsyncClient
-from mistralai.models.chat_completion import ChatMessage
+from mistralai.client.sdk import Mistral
 
 # ---------------------------------------------------------------------------
 # Module-level LLM clients (initialized once when API keys are available)
@@ -25,7 +24,7 @@ groq_client = (
 )
 
 mistral_client = (
-    MistralAsyncClient(api_key=config.MISTRAL_API_KEY)
+    Mistral(api_key=config.MISTRAL_API_KEY)
     if config.MISTRAL_API_KEY
     else None
 )
@@ -175,11 +174,11 @@ async def _call_mistral(prompt: str, system: str) -> str:
         raise RuntimeError("MISTRAL_API_KEY is not configured")
 
     try:
-        response = await mistral_client.chat(
+        response = await mistral_client.chat.complete_async(
             model=MISTRAL_MODEL,
             messages=[
-                ChatMessage(role="system", content=system),
-                ChatMessage(role="user", content=prompt),
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
             ],
         )
         return response.choices[0].message.content
