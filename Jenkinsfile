@@ -67,6 +67,34 @@ pipeline {
                 '''
             }
         }
+
+        stage('Trivy Security Scan') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Scanning backend image..."
+                    trivy \
+                        --config /dev/null \
+                        --ignorefile /dev/null \
+                        image \
+                        --scanners vuln \
+                        --severity CRITICAL \
+                        --exit-code 1 \
+                        codegraph-backend:${BUILD_NUMBER}
+
+                    echo "Scanning frontend image..."
+                    trivy \
+                        --config /dev/null \
+                        --ignorefile /dev/null \
+                        image \
+                        --scanners vuln \
+                        --severity CRITICAL \
+                        --exit-code 1 \
+                        codegraph-frontend:${BUILD_NUMBER}
+                '''
+            }
+        }
     }
 
     post {
