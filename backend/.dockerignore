@@ -4,3 +4,5 @@ cache/
 .env
 .env.*
 *.pyc
+.ci-venv/
+.pytest_cache/
