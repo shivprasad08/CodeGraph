@@ -74,6 +74,7 @@ pipeline {
                     set -eu
 
                     echo "Scanning backend image..."
+
                     trivy \
                         --config /dev/null \
                         --ignorefile /dev/null \
@@ -85,6 +86,7 @@ pipeline {
                         codegraph-backend:${BUILD_NUMBER}
 
                     echo "Scanning frontend image..."
+
                     trivy \
                         --config /dev/null \
                         --ignorefile /dev/null \
@@ -97,9 +99,40 @@ pipeline {
                 '''
             }
         }
+
+        stage('Push Images') {
+            steps {
+                sh '''
+                    set -eu
+
+                    echo "Tagging images for local registry..."
+
+                    docker tag \
+                        codegraph-backend:${BUILD_NUMBER} \
+                        localhost:5000/codegraph-backend:${BUILD_NUMBER}
+
+                    docker tag \
+                        codegraph-frontend:${BUILD_NUMBER} \
+                        localhost:5000/codegraph-frontend:${BUILD_NUMBER}
+
+                    echo "Pushing backend image..."
+
+                    docker push \
+                        localhost:5000/codegraph-backend:${BUILD_NUMBER}
+
+                    echo "Pushing frontend image..."
+
+                    docker push \
+                        localhost:5000/codegraph-frontend:${BUILD_NUMBER}
+
+                    echo "Images pushed successfully."
+                '''
+            }
+        }
     }
 
     post {
+
         always {
             sh '''
                 rm -rf backend/.ci-venv
