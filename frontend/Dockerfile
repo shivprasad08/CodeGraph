@@ -12,6 +12,10 @@ RUN npm run build
 
 # ---- serve stage ----
 FROM nginx:alpine
+
+RUN apk update && apk upgrade
+
+# Vite outputs to /dist. If you use Create React App, change to /app/build
 # Vite outputs to /dist. If you use Create React App, change to /app/build
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
