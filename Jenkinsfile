@@ -79,7 +79,8 @@ pipeline {
                         --ignorefile /dev/null \
                         image \
                         --scanners vuln \
-                        --severity CRITICAL \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
                         --exit-code 1 \
                         codegraph-backend:${BUILD_NUMBER}
 
@@ -89,7 +90,8 @@ pipeline {
                         --ignorefile /dev/null \
                         image \
                         --scanners vuln \
-                        --severity CRITICAL \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
                         --exit-code 1 \
                         codegraph-frontend:${BUILD_NUMBER}
                 '''
