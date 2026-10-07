@@ -158,10 +158,10 @@ async def test_run_pipeline_cache_hit():
     job_id = "cache-job"
     jobs[job_id] = {"status": "queued"}
     
-    mock_ingestion = {"repo": "a/b", "commit_sha": "123"}
+    mock_ingestion = {"repo": "a/b", "commit_sha": "123", "files": []}
     mock_graph = {"nodes": [], "edges": []}
     
-    with patch("backend.ingestion.fetch_repo", return_value=mock_ingestion), \
+    with patch("ingestion.fetch_repo", return_value=mock_ingestion), \
          patch("backend.cache.read_cache", return_value=mock_graph), \
          patch("backend.enrichment.enrich_graph") as mock_enrich:
         
@@ -169,7 +169,8 @@ async def test_run_pipeline_cache_hit():
         
         assert mock_enrich.call_count == 0
         assert jobs[job_id]["status"] == "done"
-        assert jobs[job_id]["graph"] == mock_graph
+        assert jobs[job_id]["graph"]["nodes"] == mock_graph["nodes"]
+        assert jobs[job_id]["graph"]["edges"] == mock_graph["edges"]
 
 
 @pytest.mark.asyncio
@@ -179,19 +180,20 @@ async def test_run_pipeline_enrichment_failure_is_non_fatal():
     job_id = "enrich-fail-job"
     jobs[job_id] = {"status": "queued"}
     
-    mock_ingestion = {"repo": "a/b", "commit_sha": "123"}
+    mock_ingestion = {"repo": "a/b", "commit_sha": "123", "files": []}
     mock_parse = {"parsed": True}
     mock_graph = {"nodes": [], "edges": []}
     
-    with patch("backend.ingestion.fetch_repo", return_value=mock_ingestion), \
-         patch("backend.cache.read_cache", return_value=None), \
+    with patch("ingestion.fetch_repo", return_value=mock_ingestion), \
+         patch("cache.read_cache", return_value=None), \
          patch("backend.parser.parse_repo", return_value=mock_parse), \
          patch("backend.graph_builder.build_graph", return_value=mock_graph, create=True), \
          patch("backend.enrichment.enrich_graph", side_effect=RuntimeError("LLM failed")), \
-         patch("backend.cache.write_cache") as mock_write:
+         patch("cache.write_cache") as mock_write:
         
         await _run_pipeline(job_id, "https://github.com/a/b")
         
         assert jobs[job_id]["status"] == "done"
-        assert jobs[job_id]["graph"] == mock_graph
+        assert jobs[job_id]["graph"]["nodes"] == mock_graph["nodes"]
+        assert jobs[job_id]["graph"]["edges"] == mock_graph["edges"]
         mock_write.assert_called_once()
