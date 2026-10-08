@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, BackgroundTasks, Request, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 app = FastAPI(title="CodeGraph API", version="1.0.0", lifespan=lifespan)
+Instrumentator().instrument(app).expose(app)
 
 # Force wildcard CORS to ensure Vercel frontend can always connect
 app.add_middleware(
