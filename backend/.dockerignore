@@ -6,3 +6,6 @@ cache/
 *.pyc
 .ci-venv/
 .pytest_cache/
+
+.test-venv/
+.security-test-venv/
