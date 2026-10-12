@@ -1,36 +1,38 @@
+```groovy
 pipeline {
     agent any
 
-    // Build automatically when GitHub sends a push webhook to /github-webhook/.
-    // Requires the GitHub plugin; the job's SCM branch specifier (*/main)
-    // limits builds to pushes that change main.
+    // Trigger automatically when GitHub sends a push webhook.
     triggers {
         githubPush()
     }
 
     options {
-        // One build at a time on the resource-constrained EC2 host.
+        // Checkout explicitly in the Checkout stage only once.
+        skipDefaultCheckout(true)
+
+        // Protect the small EC2 instance from concurrent builds.
         disableConcurrentBuilds()
+
+        // Keep the latest 20 builds.
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
-    // Dashboard links shown in the build log and build description.
-    // Override any of these via Manage Jenkins -> System -> Global properties
-    // -> Environment variables (e.g. once the unified reverse-proxy URLs exist).
     environment {
-        APP_URL        = "${env.CODEGRAPH_APP_URL ?: 'http://13.206.56.253:30081'}"
+        APP_URL = "${env.CODEGRAPH_APP_URL ?: 'http://13.206.56.253:30081'}"
         JENKINS_UI_URL = "${env.CODEGRAPH_JENKINS_URL ?: 'http://13.206.56.253:8080'}"
         PROMETHEUS_URL = "${env.CODEGRAPH_PROMETHEUS_URL ?: 'http://localhost:9091'}"
-        GRAFANA_URL    = "${env.CODEGRAPH_GRAFANA_URL ?: 'http://localhost:3001'}"
+        GRAFANA_URL = "${env.CODEGRAPH_GRAFANA_URL ?: 'http://localhost:3001'}"
         MONITORING_URL_NOTE = "${env.CODEGRAPH_MONITORING_NOTE ?: '(requires the local SSH tunnel)'}"
     }
 
     stages {
-
         stage('Checkout') {
             steps {
                 checkout scm
+
                 sh '''
+                    set -eu
                     echo "Branch: ${GIT_BRANCH:-unknown}"
                     echo "Commit: ${GIT_COMMIT:-unknown}"
                     git log -1 --oneline
@@ -42,14 +44,19 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     cd backend
 
-                    python3 -m venv .ci-venv
+                    # Reuse the virtual environment between builds.
+                    if [ ! -x .ci-venv/bin/python ]; then
+                        python3 -m venv .ci-venv
+                    fi
+
                     . .ci-venv/bin/activate
 
-                    python -m pip install --upgrade pip
-                    pip install -r requirements-dev.txt
+                    # Install only missing or changed dependencies.
+                    python -m pip install \
+                        --disable-pip-version-check \
+                        -r requirements-dev.txt
 
                     cd ..
                     pytest -q
@@ -61,7 +68,6 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
                     cd frontend
 
                     npm ci
@@ -70,17 +76,8 @@ pipeline {
             }
         }
 
-        stage('Frontend Build') {
-            steps {
-                sh '''
-                    set -eu
-
-                    cd frontend
-                    npm run build
-                '''
-            }
-        }
-
+        // The production frontend build is performed by the
+        // frontend Dockerfile, so a separate npm run build is redundant.
         stage('Docker Build') {
             steps {
                 sh '''
@@ -145,12 +142,10 @@ pipeline {
                         localhost:5000/codegraph-frontend:${BUILD_NUMBER}
 
                     echo "Pushing backend image..."
-
                     docker push \
                         localhost:5000/codegraph-backend:${BUILD_NUMBER}
 
                     echo "Pushing frontend image..."
-
                     docker push \
                         localhost:5000/codegraph-frontend:${BUILD_NUMBER}
 
@@ -164,9 +159,13 @@ pipeline {
                 sh '''
                     set -eu
 
-                    echo "Deploying CodeGraph to Kubernetes..."
-
                     export HOME=/var/lib/jenkins
+                    export KUBECONFIG=/var/lib/jenkins/.kube/config
+
+                    echo "Checking Kubernetes access..."
+                    kubectl get nodes
+
+                    echo "Deploying CodeGraph with Helm..."
 
                     helm upgrade --install codegraph \
                         "$WORKSPACE/helm/codegraph" \
@@ -183,12 +182,7 @@ pipeline {
     }
 
     post {
-
         always {
-            sh '''
-                rm -rf backend/.ci-venv
-            '''
-
             echo """
 ==================== CodeGraph dashboards ====================
 Build result : ${currentBuild.currentResult}
@@ -200,8 +194,12 @@ Grafana      : ${env.GRAFANA_URL} ${env.MONITORING_URL_NOTE}
 =============================================================="""
 
             script {
-                def shortCommit = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'unknown'
-                currentBuild.description = "${shortCommit} | App: ${env.APP_URL} | Grafana: ${env.GRAFANA_URL}"
+                def shortCommit = env.GIT_COMMIT
+                    ? env.GIT_COMMIT.take(7)
+                    : 'unknown'
+
+                currentBuild.description =
+                    "${shortCommit} | App: ${env.APP_URL} | Grafana: ${env.GRAFANA_URL}"
             }
         }
 
@@ -214,3 +212,4 @@ Grafana      : ${env.GRAFANA_URL} ${env.MONITORING_URL_NOTE}
         }
     }
 }
+```
