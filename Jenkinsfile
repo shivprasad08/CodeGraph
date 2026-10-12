@@ -1,4 +1,3 @@
-```groovy
 pipeline {
     agent any
 
@@ -212,4 +211,3 @@ Grafana      : ${env.GRAFANA_URL} ${env.MONITORING_URL_NOTE}
         }
     }
 }
-```
