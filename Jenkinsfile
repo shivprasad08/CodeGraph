@@ -162,7 +162,21 @@ pipeline {
                     export KUBECONFIG=/var/lib/jenkins/.kube/config
 
                     echo "Checking Kubernetes access..."
-                    kubectl get nodes
+                    echo "Checking Kubernetes access with retries..."
+                    for attempt in 1 2 3 4 5; do
+                        if kubectl get nodes --request-timeout=15s; then
+                            echo "Kubernetes API is responding."
+                            break
+                        fi
+
+                        if [ "$attempt" -eq 5 ]; then
+                            echo "Kubernetes API remained unavailable after 5 attempts."
+                            exit 1
+                        fi
+
+                        echo "Attempt $attempt failed; retrying in 10 seconds..."
+                        sleep 10
+                    done
 
                     echo "Deploying CodeGraph with Helm..."
 
