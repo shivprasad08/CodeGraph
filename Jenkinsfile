@@ -1,19 +1,13 @@
 pipeline {
     agent any
 
-    // Trigger automatically when GitHub sends a push webhook.
     triggers {
         githubPush()
     }
 
     options {
-        // Checkout explicitly in the Checkout stage only once.
         skipDefaultCheckout(true)
-
-        // Protect the small EC2 instance from concurrent builds.
         disableConcurrentBuilds()
-
-        // Keep the latest 20 builds.
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
@@ -30,10 +24,26 @@ pipeline {
             steps {
                 checkout scm
 
+                script {
+                    env.CODEGRAPH_COMMIT = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    env.CODEGRAPH_BRANCH = sh(
+                        script: "git branch -r --contains HEAD | sed -n 's#^[[:space:]]*origin/##p' | head -n 1 || true",
+                        returnStdout: true
+                    ).trim()
+
+                    if (!env.CODEGRAPH_BRANCH) {
+                        env.CODEGRAPH_BRANCH = 'main'
+                    }
+                }
+
                 sh '''
                     set -eu
-                    echo "Branch: ${GIT_BRANCH:-unknown}"
-                    echo "Commit: ${GIT_COMMIT:-unknown}"
+                    echo "Branch: ${CODEGRAPH_BRANCH}"
+                    echo "Commit: ${CODEGRAPH_COMMIT}"
                     git log -1 --oneline
                 '''
             }
@@ -45,14 +55,12 @@ pipeline {
                     set -eu
                     cd backend
 
-                    # Reuse the virtual environment between builds.
                     if [ ! -x .ci-venv/bin/python ]; then
                         python3 -m venv .ci-venv
                     fi
 
                     . .ci-venv/bin/activate
 
-                    # Install only missing or changed dependencies.
                     python -m pip install \
                         --disable-pip-version-check \
                         -r requirements-dev.txt
@@ -68,15 +76,12 @@ pipeline {
                 sh '''
                     set -eu
                     cd frontend
-
                     npm ci
                     npm test
                 '''
             }
         }
 
-        // The production frontend build is performed by the
-        // frontend Dockerfile, so a separate npm run build is redundant.
         stage('Docker Build') {
             steps {
                 sh '''
@@ -99,7 +104,6 @@ pipeline {
                     set -eu
 
                     echo "Scanning backend image..."
-
                     trivy \
                         --config /dev/null \
                         --ignorefile /dev/null \
@@ -111,7 +115,6 @@ pipeline {
                         codegraph-backend:${BUILD_NUMBER}
 
                     echo "Scanning frontend image..."
-
                     trivy \
                         --config /dev/null \
                         --ignorefile /dev/null \
@@ -129,8 +132,6 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-
-                    echo "Tagging images for local registry..."
 
                     docker tag \
                         codegraph-backend:${BUILD_NUMBER} \
@@ -161,22 +162,64 @@ pipeline {
                     export HOME=/var/lib/jenkins
                     export KUBECONFIG=/var/lib/jenkins/.kube/config
 
-                    echo "Checking Kubernetes access..."
-                    echo "Checking Kubernetes access with retries..."
-                    for attempt in 1 2 3 4 5; do
-                        if kubectl get nodes --request-timeout=15s; then
-                            echo "Kubernetes API is responding."
-                            break
+                    echo "Waiting for Kubernetes API and nodes to be Ready..."
+
+                    ready_streak=0
+                    attempt=1
+                    error_file="$(mktemp)"
+                    trap 'rm -f "$error_file"' EXIT
+
+                    # Require two consecutive successful checks where
+                    # every Kubernetes node reports Ready.
+                    while [ "$attempt" -le 10 ]; do
+
+                        if node_output=$(kubectl get nodes \
+                            --no-headers \
+                            --request-timeout=10s \
+                            2>"$error_file"); then
+
+                            if [ -n "$node_output" ] && \
+                                printf '%s\\n' "$node_output" | \
+                                awk 'NF {
+                                    count++
+                                    if ($2 != "Ready") bad=1
+                                }
+                                END {
+                                    exit (count == 0 || bad)
+                                }'; then
+
+                                ready_streak=$((ready_streak + 1))
+
+                                echo "Attempt $attempt: all nodes Ready ($ready_streak/2 consecutive checks)."
+
+                                if [ "$ready_streak" -ge 2 ]; then
+                                    break
+                                fi
+                            else
+                                ready_streak=0
+
+                                echo "Attempt $attempt: API responded, but at least one node is not Ready."
+                                printf '%s\\n' "$node_output"
+                            fi
+                        else
+                            ready_streak=0
+
+                            echo "Attempt $attempt: Kubernetes API request failed."
+                            cat "$error_file" || true
                         fi
 
-                        if [ "$attempt" -eq 5 ]; then
-                            echo "Kubernetes API remained unavailable after 5 attempts."
+                        if [ "$attempt" -eq 10 ]; then
+                            echo "ERROR: Kubernetes did not remain Ready after 10 attempts."
+                            kubectl get nodes -o wide \
+                                --request-timeout=10s || true
                             exit 1
                         fi
 
-                        echo "Attempt $attempt failed; retrying in 10 seconds..."
-                        sleep 10
+                        attempt=$((attempt + 1))
+                        sleep 5
                     done
+
+                    echo "Kubernetes readiness confirmed."
 
                     echo "Deploying CodeGraph with Helm..."
 
@@ -186,9 +229,23 @@ pipeline {
                         --set backend.image=localhost:5000/codegraph-backend:${BUILD_NUMBER} \
                         --set frontend.image=localhost:5000/codegraph-frontend:${BUILD_NUMBER} \
                         --wait \
-                        --timeout 5m
+                        --timeout 8m
 
-                    echo "Helm deployment completed."
+                    echo "Verifying backend rollout..."
+                    kubectl rollout status \
+                        deployment/codegraph-backend \
+                        -n codegraph \
+                        --timeout=120s
+
+                    echo "Verifying frontend rollout..."
+                    kubectl rollout status \
+                        deployment/codegraph-frontend \
+                        -n codegraph \
+                        --timeout=120s
+
+                    kubectl get pods -n codegraph -o wide
+
+                    echo "Helm deployment and rollout verification completed."
                 '''
             }
         }
@@ -199,7 +256,8 @@ pipeline {
             echo """
 ==================== CodeGraph dashboards ====================
 Build result : ${currentBuild.currentResult}
-Commit       : ${env.GIT_COMMIT ?: 'unknown'}
+Branch       : ${env.CODEGRAPH_BRANCH ?: 'unknown'}
+Commit       : ${env.CODEGRAPH_COMMIT ?: 'unknown'}
 CodeGraph    : ${env.APP_URL}
 Jenkins build: ${env.BUILD_URL ?: env.JENKINS_UI_URL}
 Prometheus   : ${env.PROMETHEUS_URL} ${env.MONITORING_URL_NOTE}
@@ -207,8 +265,8 @@ Grafana      : ${env.GRAFANA_URL} ${env.MONITORING_URL_NOTE}
 =============================================================="""
 
             script {
-                def shortCommit = env.GIT_COMMIT
-                    ? env.GIT_COMMIT.take(7)
+                def shortCommit = env.CODEGRAPH_COMMIT
+                    ? env.CODEGRAPH_COMMIT.take(7)
                     : 'unknown'
 
                 currentBuild.description =
