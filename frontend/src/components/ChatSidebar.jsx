@@ -3,8 +3,10 @@ import { ArrowUp, Copy, Download, MessageSquare, RotateCcw, Square } from 'lucid
 import { API_ERROR, streamChatMessage, fetchChatSuggestions } from '../api';
 import { cn } from '../lib/cn';
 import { Button, IconButton, focusRing } from '../ui';
-import ChatMarkdown, { stripReferences } from './app/ChatMarkdown';
+import ChatMarkdown, { cleanAnswer } from './app/ChatMarkdown';
 import { InlineError, RecoveryNotice } from './app/RecoveryStatus';
+import { ArchitectureCard, FlowCard, ReferenceChips } from './app/ChatDiagrams';
+import { isArchitectureQuestion } from '../lib/architecture';
 
 const MESSAGE_LIMIT = 20;
 
@@ -13,7 +15,17 @@ const MESSAGE_LIMIT = 20;
  * with Markdown, and node references select + zoom the node.
  * In offline (/demo) mode it shows an empty state instead.
  */
-export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNodeHighlight, onAnalyzeOwn, onRerun, onReloadGraph }) {
+export default function ChatSidebar({
+  graph,
+  offline = false,
+  onNodeSelect,
+  onNodeHighlight,
+  onAnalyzeOwn,
+  onRerun,
+  onReloadGraph,
+  dirColorMap,
+  onDiagramNodeClick,
+}) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isWaiting, setIsWaiting] = useState(false); // sent, no token yet
@@ -60,7 +72,8 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
     setMessages((prev) => [
       ...prev,
       { id: `${Date.now()}-u`, role: 'user', content: text },
-      { id: `${Date.now()}-a`, role: 'assistant', content: '', nodes: [] },
+      // Architecture questions get a diagram computed from the graph (no extra LLM call)
+      { id: `${Date.now()}-a`, role: 'assistant', content: '', nodes: [], archCard: isArchitectureQuestion(text), diagram: null },
     ]);
     setInputValue('');
     setIsWaiting(true);
@@ -77,11 +90,11 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
         setIsStreaming(true);
         updateLast((m) => ({ ...m, content: m.content + token }));
       },
-      (refs) => {
+      (refs, extra) => {
         setIsWaiting(false);
         setIsStreaming(false);
         abortRef.current = null;
-        updateLast((m) => ({ ...m, nodes: refs, content: m.content || 'Stopped.' }));
+        updateLast((m) => ({ ...m, nodes: refs, diagram: extra?.diagram ?? null, content: m.content || 'Stopped.' }));
         if (refs.length) onNodeHighlight?.(refs);
       },
       (message, apiError) => {
@@ -196,32 +209,21 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
                   ) : (
                     <ChatMarkdown text={m.content} nodeIds={nodeIds} onNode={selectNodeById} />
                   )}
-                  {m.nodes?.length > 0 && (
-                    <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                      <span className="text-cg-xs text-cg-tertiary">Referenced</span>
-                      {m.nodes.map((id) => (
-                        <button
-                          key={id}
-                          type="button"
-                          title={id}
-                          onClick={() => selectNodeById(id)}
-                          className={cn(
-                            'rounded border border-cg-border-strong px-1.5 py-0.5 font-cg-mono text-cg-xs text-cg-text',
-                            'transition-colors duration-cg-fast ease-cg hover:bg-cg-hover',
-                            focusRing,
-                          )}
-                        >
-                          {id.split('::').pop().split('/').pop()}
-                        </button>
-                      ))}
-                    </div>
+                  {!m.error && !(isStreaming && idx === messages.length - 1) && m.content && (
+                    <>
+                      {m.diagram?.nodes?.length >= 2 && (
+                        <FlowCard diagram={m.diagram} graph={graph} dirColorMap={dirColorMap} onNodeClick={onDiagramNodeClick} />
+                      )}
+                      {m.archCard && <ArchitectureCard graph={graph} dirColorMap={dirColorMap} onNodeClick={onDiagramNodeClick} />}
+                    </>
                   )}
+                  <ReferenceChips ids={m.nodes ?? []} onSelect={selectNodeById} />
                   {m.content && !m.error && !(isStreaming && idx === messages.length - 1) && (
                     <IconButton
                       label="Copy answer"
                       size="sm"
                       className="mt-1 opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-focus-within:opacity-100 [@media(hover:hover)]:group-hover:opacity-100"
-                      onClick={() => navigator.clipboard?.writeText(stripReferences(m.content))}
+                      onClick={() => navigator.clipboard?.writeText(cleanAnswer(m.content))}
                     >
                       <Copy size={14} strokeWidth={1.5} aria-hidden="true" />
                     </IconButton>

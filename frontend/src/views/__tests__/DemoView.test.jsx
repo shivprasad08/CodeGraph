@@ -59,6 +59,21 @@ vi.mock('react-resizable-panels', async () => {
   };
 });
 
+// React Flow needs real layout; the lazy diagram renderer is swapped for a list
+vi.mock('../../components/diagram/FlowDiagram', () => ({
+  default: ({ spec, onNodeClick, ariaLabel }) => (
+    <ul aria-label={ariaLabel} data-testid="flow-diagram">
+      {spec.nodes.map((n) => (
+        <li key={n.id}>
+          <button type="button" onClick={() => onNodeClick?.(n)}>
+            {n.label}
+          </button>
+        </li>
+      ))}
+    </ul>
+  ),
+}));
+
 import * as api from '../../api';
 import DemoView from '../DemoView';
 import { DEMO_DATA_URL } from '../../lib/demo';
@@ -171,6 +186,25 @@ describe('/demo app view', () => {
 
     await act(async () => press(']'));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Show inspector' })).toBeTruthy());
+  });
+
+  it('switches to the Architecture view and back to the graph on a module click', async () => {
+    await renderDemo();
+    const group = screen.getByRole('radiogroup', { name: 'Canvas view' });
+    expect(within(group).getByRole('radio', { name: 'Graph' }).getAttribute('aria-checked')).toBe('true');
+
+    fireEvent.click(within(group).getByRole('radio', { name: 'Architecture' }));
+    const diagram = await screen.findByTestId('flow-diagram');
+    expect(within(diagram).getByRole('button', { name: 'election' })).toBeTruthy();
+    expect(within(diagram).queryByRole('button', { name: 'scripts' })).toBeNull(); // hidden by default
+    expect(screen.getByText(/Modules computed from the code graph/)).toBeTruthy();
+
+    fireEvent.click(within(diagram).getByRole('button', { name: 'election' }));
+    await waitFor(() => expect(screen.queryByTestId('flow-diagram')).toBeNull());
+    expect(within(group).getByRole('radio', { name: 'Graph' }).getAttribute('aria-checked')).toBe('true');
+    expect(activeTab()).toBe('Details');
+    // Details shows the module's main file
+    expect(screen.getByRole('heading', { level: 2, name: (name) => name.startsWith('src/miniredis/election/') })).toBeTruthy();
   });
 
   it('ignores single-key shortcuts while typing', async () => {

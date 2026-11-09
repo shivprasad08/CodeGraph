@@ -136,7 +136,7 @@ class TestStreamChatResponse:
 
         assert [e["token"] for e in events[:-1]] == ["Hello ", "there.\nNODE: a.py::foo"]
         assert all(e["done"] is False for e in events[:-1])
-        assert events[-1] == {"token": "", "done": True, "nodes": ["a.py::foo"]}
+        assert events[-1] == {"token": "", "done": True, "nodes": ["a.py::foo"], "diagram": None}
         mistral.chat.stream_async.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -161,7 +161,7 @@ class TestStreamChatResponse:
             ))
 
         assert events[0] == {"token": "From Mistral.", "done": False}
-        assert events[-1] == {"token": "", "done": True, "nodes": []}
+        assert events[-1] == {"token": "", "done": True, "nodes": [], "diagram": None}
         mistral.chat.stream_async.assert_awaited_once()
         kwargs = groq.chat.completions.create.call_args.kwargs
         assert kwargs["extra_body"] == {"reasoning_effort": "low"}
@@ -180,3 +180,98 @@ class TestStreamChatResponse:
 
         assert events == [{"token": chat.BUSY_MESSAGE, "done": True, "nodes": []}]
         assert "secret internal detail" not in json.dumps(events)
+
+
+class TestExtractDiagram:
+    GRAPH = {"nodes": [
+        {"id": "src/node.py::start", "label": "start"},
+        {"id": "src/node.py::_build", "label": "_build"},
+        {"id": "src/server.py::run_server", "label": "run_server"},
+    ]}
+
+    @staticmethod
+    def _answer(spec_text):
+        return f"Prose answer.\n\n```diagram\n{spec_text}\n```\n\nReferences:\nNODE: src/node.py::start"
+
+    def test_valid_spec_passes(self):
+        spec = {
+            "direction": "LR",
+            "nodes": [
+                {"id": "n1", "ref": "src/node.py::start", "label": "Start node"},
+                {"id": "n2", "ref": "src/node.py::_build", "label": "Build services"},
+                {"id": "n3", "ref": "src/server.py::run_server", "label": "Run server"},
+            ],
+            "edges": [{"source": "n1", "target": "n2", "label": "calls"}, {"source": "n2", "target": "n3"}],
+        }
+        out = chat.extract_diagram(self._answer(json.dumps(spec)), self.GRAPH)
+        assert out == spec
+
+    def test_invented_refs_are_dropped_with_their_edges(self):
+        spec = {
+            "nodes": [
+                {"id": "n1", "ref": "src/node.py::start", "label": "Start"},
+                {"id": "n2", "ref": "src/made_up.py::ghost", "label": "Ghost"},
+                {"id": "n3", "ref": "src/server.py::run_server", "label": "Run"},
+            ],
+            "edges": [{"source": "n1", "target": "n2"}, {"source": "n2", "target": "n3"}, {"source": "n1", "target": "n3"}],
+        }
+        out = chat.extract_diagram(self._answer(json.dumps(spec)), self.GRAPH)
+        assert [n["id"] for n in out["nodes"]] == ["n1", "n3"]
+        assert out["edges"] == [{"source": "n1", "target": "n3"}]
+        assert out["direction"] == "TB"
+
+    def test_fewer_than_two_valid_nodes_is_discarded(self):
+        spec = {
+            "nodes": [
+                {"id": "n1", "ref": "src/node.py::start", "label": "Start"},
+                {"id": "n2", "ref": "nope::nope", "label": "Nope"},
+            ],
+            "edges": [{"source": "n1", "target": "n2"}],
+        }
+        assert chat.extract_diagram(self._answer(json.dumps(spec)), self.GRAPH) is None
+
+    def test_malformed_json_is_ignored(self):
+        assert chat.extract_diagram(self._answer('{"nodes": [ {"id": "n1", '), self.GRAPH) is None
+        assert chat.extract_diagram(self._answer('[1, 2, 3]'), self.GRAPH) is None
+        assert chat.extract_diagram("No diagram here.", self.GRAPH) is None
+
+    def test_caps_nodes_and_defaults_labels(self):
+        graph = {"nodes": [{"id": f"m.py::f{i}", "label": f"f{i}"} for i in range(15)]}
+        spec = {"nodes": [{"id": f"n{i}", "ref": f"m.py::f{i}"} for i in range(15)], "edges": []}
+        out = chat.extract_diagram(self._answer(json.dumps(spec)), graph)
+        assert len(out["nodes"]) == 10
+        assert out["nodes"][0]["label"] == "f0"
+
+    @pytest.mark.asyncio
+    async def test_final_event_carries_validated_diagram(self):
+        graph = {"repo": "o/r", "nodes": self.GRAPH["nodes"], "edges": []}
+        spec = {
+            "nodes": [
+                {"id": "n1", "ref": "src/node.py::start", "label": "Start"},
+                {"id": "n2", "ref": "src/node.py::_build", "label": "Build"},
+                {"id": "n9", "ref": "invented.py::x", "label": "Invented"},
+            ],
+            "edges": [{"source": "n1", "target": "n2"}, {"source": "n2", "target": "n9"}],
+        }
+        answer = self._answer(json.dumps(spec))
+        mistral = _mistral_client([answer[:20], answer[20:]])
+        with patch.object(chat, "groq_client", _failing_groq_client(_rate_limit_error())), \
+             patch.object(chat, "mistral_client", mistral):
+            events = _events(await _collect(chat.stream_chat_response("o/r", graph, "How does start work?", [])))
+
+        final = events[-1]
+        assert final["done"] is True
+        assert final["diagram"] == {
+            "direction": "TB",
+            "nodes": [
+                {"id": "n1", "ref": "src/node.py::start", "label": "Start"},
+                {"id": "n2", "ref": "src/node.py::_build", "label": "Build"},
+            ],
+            "edges": [{"source": "n1", "target": "n2"}],
+        }
+        assert final["nodes"] == ["src/node.py::start"]
+
+    def test_prompt_contains_diagram_rule_with_literal_braces(self):
+        prompt = chat.build_system_prompt("o/r", {"repo": "o/r", "nodes": [], "edges": []})
+        assert '```diagram' in prompt
+        assert '{"direction":"TB","nodes":[{"id":"n1"' in prompt

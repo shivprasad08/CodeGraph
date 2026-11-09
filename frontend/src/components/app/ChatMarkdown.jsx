@@ -5,6 +5,26 @@ import { focusRing } from '../../ui';
 // Drop the model's trailing "References:" block; its node ids are shown as chips instead
 export const stripReferences = (text) => text.replace(/(?:\n|^)\**References:?\**[\s\S]*$/i, '').trim();
 
+/**
+ * Hide the ```diagram JSON block (rendered as a card instead). Also hides a block
+ * that is still streaming (no closing fence yet) and a partial opening fence at the end.
+ */
+export function stripDiagram(text) {
+  let out = text.replace(/```diagram[\s\S]*?(?:```|$)/g, '');
+  // A partial fence at the very end ("`", "``", "```dia"…) may be a diagram block
+  // that is still arriving. Fences start a line; it is an opener only when the
+  // fences before it are balanced (otherwise it closes a normal code block).
+  const tail = out.match(/(^|\n)`{1,3}(?:d(?:i(?:a(?:g(?:r(?:a(?:m)?)?)?)?)?)?)?$/);
+  if (tail) {
+    const before = out.slice(0, tail.index + tail[1].length);
+    if ((before.match(/```/g) || []).length % 2 === 0) out = before;
+  }
+  return out;
+}
+
+/** Text the user should see: no diagram JSON, no References block. */
+export const cleanAnswer = (text) => stripReferences(stripDiagram(text));
+
 /** Inline: `code` (node ids become chips), **bold**. */
 function Inline({ text, nodeIds, onNode }) {
   const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/g);
@@ -47,7 +67,7 @@ function Inline({ text, nodeIds, onNode }) {
  */
 export default function ChatMarkdown({ text, nodeIds, onNode }) {
   const blocks = [];
-  const lines = stripReferences(text).split('\n');
+  const lines = cleanAnswer(text).split('\n');
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];

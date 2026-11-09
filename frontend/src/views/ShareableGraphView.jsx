@@ -18,6 +18,13 @@ import Inspector, { INSPECTOR_TABS } from '../components/app/Inspector';
 import StatusBar from '../components/app/StatusBar';
 import GraphLegend from '../components/app/GraphLegend';
 import CommandPalette from '../components/app/CommandPalette';
+import ArchitectureView from '../components/app/ArchitectureView';
+import SegmentedControl from '../ui/SegmentedControl';
+
+const CANVAS_VIEWS = [
+  { value: 'graph', label: 'Graph' },
+  { value: 'architecture', label: 'Architecture' },
+];
 
 const MOBILE_QUERY = '(max-width: 767px)';
 const LEFT_PX = { default: 264, min: 200, max: 420 };
@@ -164,6 +171,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
   const [blastRadius, setBlastRadius] = useState(null);
   const [simulationSource, setSimulationSource] = useState(null);
   const [tab, setTab] = useState('details');
+  const [canvasView, setCanvasView] = useState('graph'); // 'graph' | 'architecture'
   const [code, setCode] = useState(null); // { file, line }
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentIds, setRecentIds] = useState([]);
@@ -289,6 +297,27 @@ export default function ShareableGraphView({ staticData = null } = {}) {
     setTab('impact');
     showInspector();
     if (isMobile) setFilesSheet(false);
+  };
+
+  // Diagram click: a module highlights and zooms to its files (main file in Details);
+  // a flow node selects and zooms to that node. Either way the graph is shown.
+  const handleDiagramNode = (specNode) => {
+    if (!graphData) return;
+    setCanvasView('graph');
+    if (specNode.members) {
+      const files = new Set(specNode.members);
+      const ids = graphData.nodes.filter((n) => files.has(n.type === 'file' ? n.id : n.file)).map((n) => n.id);
+      const mainFile = graphData.nodes.find((n) => n.id === specNode.nodeRef);
+      if (mainFile) selectNode(mainFile);
+      setHighlightedNodeIds(new Set(ids));
+      setZoomToNodes(ids);
+      return;
+    }
+    const node = graphData.nodes.find((n) => n.id === specNode.nodeRef);
+    if (node) {
+      selectNode(node);
+      setZoomToNodes([node.id]);
+    }
   };
 
   const handleChatHighlight = useCallback((ids) => {
@@ -476,6 +505,8 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       onAnalyzeOwn={() => navigate('/')}
       onRerun={offline ? undefined : rerun}
       onReloadGraph={offline ? undefined : reloadGraph}
+      dirColorMap={dirColorMap}
+      onDiagramNodeClick={handleDiagramNode}
     />
   );
 
@@ -503,7 +534,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
         />
 
         {(notice || (isMobile && showSmallNote)) && (
-          <div className="absolute inset-x-3 top-3 z-30 flex flex-col gap-2">
+          <div className="absolute inset-x-3 top-14 z-30 flex flex-col gap-2">
             {notice && (
               <p role="status" className="flex items-start gap-2 rounded-cg-control border border-cg-border bg-cg-overlay py-2 pl-3 pr-1 text-cg-sm text-cg-text shadow-cg-edge">
                 <span className="flex-1">{notice}</span>
@@ -531,7 +562,18 @@ export default function ShareableGraphView({ staticData = null } = {}) {
           </div>
         )}
 
-        {!simulationMode && (
+        <SegmentedControl
+          label="Canvas view"
+          options={CANVAS_VIEWS}
+          value={canvasView}
+          onChange={setCanvasView}
+          className="absolute left-3 top-3 z-20"
+        />
+        {canvasView === 'architecture' && (
+          <ArchitectureView graph={graphData} dirColorMap={dirColorMap} onNodeClick={handleDiagramNode} />
+        )}
+
+        {!simulationMode && canvasView === 'graph' && (
           <GraphLegend
             graph={graphData}
             dirColorMap={dirColorMap}

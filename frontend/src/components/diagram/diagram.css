@@ -1,0 +1,42 @@
+/* React Flow overrides for CodeGraph diagrams (token-based, dark theme). */
+.cg-flow {
+  font-family: var(--cg-font-sans);
+  background: var(--cg-canvas);
+}
+.cg-flow .react-flow__pane {
+  cursor: grab;
+}
+.cg-flow .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+.cg-flow .react-flow__node {
+  border-radius: var(--cg-radius-control);
+}
+.cg-flow .react-flow__node:focus {
+  outline: none;
+}
+.cg-flow .react-flow__node:focus-visible {
+  outline: 2px solid var(--cg-focus);
+  outline-offset: 2px;
+}
+/* Handles exist only for edge routing; they are not interactive here */
+.cg-flow .react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+  min-width: 1px;
+  min-height: 1px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+}
+.cg-flow .react-flow__attribution {
+  background: transparent;
+  padding: 2px 6px;
+}
+.cg-flow .react-flow__attribution a {
+  color: var(--cg-text-tertiary);
+  font-size: 10px;
+}
+.cg-flow .react-flow__edge-textbg {
+  rx: 4;
+}

@@ -123,6 +123,14 @@ RULES — follow these exactly:
    NODE: src/auth.py::verify_token
    NODE: src/auth.py::TokenVerifier
    The frontend parses these to highlight nodes on the graph.
+7. If the question is about a process, flow or sequence ("how does X work",
+   "what happens when", "flow of"), then after the prose answer and before
+   References output ONE fenced block like this, with 3-10 nodes:
+   ```diagram
+   {{"direction":"TB","nodes":[{{"id":"n1","ref":"<exact node id from the structure>","label":"short label"}}],"edges":[{{"source":"n1","target":"n2","label":"optional"}}]}}
+   ```
+   Every "ref" MUST be an exact node id from the structure above. If you
+   cannot ground the flow in real node ids, omit the block entirely.
 """
 
     # Drop the lowest-weight file sections until the prompt fits the budget
@@ -197,6 +205,58 @@ async def _mistral_tokens(messages: list[dict]):
         token = event.data.choices[0].delta.content
         if isinstance(token, str) and token:
             yield token
+
+
+MAX_DIAGRAM_NODES = 10
+MAX_DIAGRAM_LABEL = 40
+_DIAGRAM_RE = re.compile(r"```diagram[ \t]*\n?(?P<body>.*?)```", re.DOTALL)
+
+
+def extract_diagram(full_response: str, graph: dict) -> dict | None:
+    """
+    Validates the model's ```diagram block against the graph. Nodes whose
+    ref is not a real node id are dropped (with their edges); fewer than 2
+    remaining nodes, or malformed JSON, means no diagram.
+    """
+    match = _DIAGRAM_RE.search(full_response or "")
+    if not match:
+        return None
+    try:
+        spec = json.loads(match.group("body").strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(spec, dict) or not isinstance(spec.get("nodes"), list):
+        return None
+
+    by_id = {n["id"]: n for n in graph.get("nodes", [])}
+    nodes, seen = [], set()
+    for raw in spec["nodes"]:
+        if not isinstance(raw, dict):
+            continue
+        node_id, ref = raw.get("id"), raw.get("ref")
+        if not isinstance(node_id, str) or not isinstance(ref, str) or node_id in seen or ref not in by_id:
+            continue
+        label = raw.get("label") if isinstance(raw.get("label"), str) and raw["label"].strip() else by_id[ref].get("label", ref)
+        nodes.append({"id": node_id, "ref": ref, "label": label.strip()[:MAX_DIAGRAM_LABEL]})
+        seen.add(node_id)
+        if len(nodes) == MAX_DIAGRAM_NODES:
+            break
+    if len(nodes) < 2:
+        return None
+
+    edges = []
+    for raw in spec.get("edges") or []:
+        if not isinstance(raw, dict):
+            continue
+        source, target = raw.get("source"), raw.get("target")
+        if source in seen and target in seen and source != target:
+            edge = {"source": source, "target": target}
+            if isinstance(raw.get("label"), str) and raw["label"].strip():
+                edge["label"] = raw["label"].strip()[:MAX_DIAGRAM_LABEL]
+            edges.append(edge)
+
+    direction = spec.get("direction") if spec.get("direction") in ("TB", "LR") else "TB"
+    return {"direction": direction, "nodes": nodes, "edges": edges}
 
 
 MAX_REFERENCED_NODES = 10
@@ -280,7 +340,13 @@ async def stream_chat_response(job_id: str, graph: dict, message: str, history: 
         except Exception as e:
             logger.error(f"Chat: {name} stream interrupted: {type(e).__name__}: {e}")
 
-        yield f"data: {json.dumps({'token': '', 'done': True, 'nodes': _referenced_nodes(full_response, graph)})}\n\n"
+        final = {
+            'token': '',
+            'done': True,
+            'nodes': _referenced_nodes(full_response, graph),
+            'diagram': extract_diagram(full_response, graph),
+        }
+        yield f"data: {json.dumps(final)}\n\n"
         return
 
     error_data = {'token': BUSY_MESSAGE, 'done': True, 'nodes': []}

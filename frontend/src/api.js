@@ -248,10 +248,11 @@ export async function fetchFileSource(repoFullName, commitSha, filePath, hooks =
 export function streamChatMessage(repoFullName, commitSha, message, history, onToken, onDone, onError, hooks = {}) {
   const controller = new AbortController();
   let finished = false;
-  const done = (nodes) => {
+  // extra = { diagram }: the server-validated flow diagram from the final event, if any
+  const done = (nodes, extra = { diagram: null }) => {
     if (finished) return;
     finished = true;
-    onDone(nodes);
+    onDone(nodes, extra);
   };
   withCacheRecovery(
     repoFullName,
@@ -272,7 +273,7 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
       readSSE(res, (data) => {
         if (data.done) {
           if (data.token) onToken(data.token);
-          done(data.nodes || []);
+          done(data.nodes || [], { diagram: data.diagram ?? null });
         } else if (data.token) {
           onToken(data.token);
         }
