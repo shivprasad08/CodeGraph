@@ -73,8 +73,9 @@ export default {
         cg: "var(--cg-ease)"
       },
       fontFamily: {
-        sans: ["Inter", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "Consolas", "monospace"],
+        // Default families now resolve to Geist / Geist Mono (Inter and JetBrains Mono removed)
+        sans: "var(--cg-font-sans)",
+        mono: "var(--cg-font-mono)",
         "cg-sans": "var(--cg-font-sans)",
         "cg-mono": "var(--cg-font-mono)"
       },
@@ -84,7 +85,9 @@ export default {
         "slide-up": "slideUp 0.4s ease-out",
         "shimmer": "shimmer 1.5s infinite",
         "cg-fade-in": "cgFadeIn var(--cg-dur-base) var(--cg-ease)",
-        "cg-scale-in": "cgScaleIn var(--cg-dur-base) var(--cg-ease)"
+        "cg-scale-in": "cgScaleIn var(--cg-dur-base) var(--cg-ease)",
+        "cg-sheet-left": "cgSheetLeft var(--cg-dur-base) var(--cg-ease)",
+        "cg-sheet-right": "cgSheetRight var(--cg-dur-base) var(--cg-ease)"
       },
       keyframes: {
         fadeIn: {
@@ -102,6 +105,14 @@ export default {
         cgFadeIn: {
           from: { opacity: 0 },
           to: { opacity: 1 }
+        },
+        cgSheetLeft: {
+          from: { opacity: 0, transform: "translateX(-16px)" },
+          to: { opacity: 1, transform: "translateX(0)" }
+        },
+        cgSheetRight: {
+          from: { opacity: 0, transform: "translateX(16px)" },
+          to: { opacity: 1, transform: "translateX(0)" }
         },
         cgScaleIn: {
           from: { opacity: 0, transform: "translate(-50%, -50%) scale(0.98)" },

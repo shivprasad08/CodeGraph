@@ -1,452 +1,390 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronsDownUp, File, Folder, FolderOpen, Search, X, Zap, Crosshair } from 'lucide-react';
+import { cn } from '../lib/cn';
+import { getTopLevelDir } from '../utils/directoryColors';
+import { IconButton, Input } from '../ui';
+
+const TYPE_DOT = { function: 'bg-cg-node-function', class: 'bg-cg-node-class' };
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Tree model
 // ---------------------------------------------------------------------------
-function buildFileTree(graph) {
-  const tree = {};
-  if (!graph || !graph.nodes) return tree;
+function buildTree(nodes) {
+  const root = { dirs: new Map(), files: [] };
+  for (const node of nodes) {
+    if (node.type !== 'file') continue;
+    const parts = (node.path ?? node.id).split('/');
+    let dir = root;
+    let dirPath = '';
+    for (const part of parts.slice(0, -1)) {
+      dirPath = dirPath ? `${dirPath}/${part}` : part;
+      if (!dir.dirs.has(part)) dir.dirs.set(part, { path: dirPath, dirs: new Map(), files: [] });
+      dir = dir.dirs.get(part);
+    }
+    dir.files.push({ name: parts.at(-1), node });
+  }
+  return root;
+}
 
-  const fileNodes = graph.nodes.filter(n => n.type === "file");
-  
-  for (const fileNode of fileNodes) {
-    const parts = fileNode.path?.split("/") ?? fileNode.id.split("/");
-    let current = tree;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (i === parts.length - 1) {
-        current[part] = {
-          __type: "file",
-          __node: fileNode,
-          __path: fileNode.id,
-          __functionCount: graph.nodes.filter(
-            n => n.file === fileNode.id && n.type === "function"
-          ).length,
-          __classCount: graph.nodes.filter(
-            n => n.file === fileNode.id && n.type === "class"
-          ).length,
-        };
-      } else {
-        if (!current[part]) {
-          current[part] = { __type: "dir" };
-        }
-        current = current[part];
+function initialExpanded(tree) {
+  // Same default as before: the first two levels are open
+  const open = new Set();
+  const walk = (dir, depth) => {
+    for (const child of dir.dirs.values()) {
+      if (depth < 2) open.add(child.path);
+      walk(child, depth + 1);
+    }
+  };
+  walk(tree, 0);
+  return open;
+}
+
+/** Visible rows in display order, with parent links for keyboard navigation. */
+function flattenRows({ tree, expanded, filter, selectedFilePath, symbolsByFile }) {
+  const rows = [];
+  const q = filter.trim().toLowerCase();
+  const matchesFile = (f) => !q || f.node.id.toLowerCase().includes(q);
+  const dirHasMatch = (dir) => dir.files.some(matchesFile) || [...dir.dirs.values()].some(dirHasMatch);
+
+  const walk = (dir, depth, parentId) => {
+    const dirs = [...dir.dirs.entries()].sort(([a], [b]) => a.localeCompare(b));
+    for (const [name, child] of dirs) {
+      if (q && !dirHasMatch(child)) continue;
+      const id = `dir:${child.path}`;
+      const open = q ? true : expanded.has(child.path);
+      rows.push({ id, kind: 'dir', name, path: child.path, depth, parentId, expanded: open });
+      if (open) walk(child, depth + 1, id);
+    }
+    const files = [...dir.files].sort((a, b) => a.name.localeCompare(b.name)).filter(matchesFile);
+    for (const f of files) {
+      const id = `file:${f.node.id}`;
+      const isSelected = f.node.id === selectedFilePath;
+      const symbols = isSelected ? symbolsByFile.get(f.node.id) ?? [] : [];
+      rows.push({
+        id,
+        kind: 'file',
+        name: f.name,
+        path: f.node.id,
+        node: f.node,
+        depth,
+        parentId,
+        expanded: symbols.length ? true : undefined,
+      });
+      for (const sym of symbols) {
+        rows.push({ id: `sym:${sym.id}`, kind: 'symbol', name: sym.label || sym.id.split('::').pop(), node: sym, depth: depth + 1, parentId: id });
       }
     }
-  }
-  return tree;
+  };
+  walk(tree, 0, null);
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
-// TreeNode Component
+// FileTree
 // ---------------------------------------------------------------------------
-function TreeNode({ 
-  name, 
-  node, 
-  depth, 
-  allGraphNodes, 
+/**
+ * File tree (role="tree"). Arrow keys move and expand/collapse, Enter selects,
+ * Home/End jump; Shift+F10 or right-click opens the file menu.
+ */
+export default function FileTree({
+  graph,
   onFileSelect,
-  onNodeSelect, 
+  onNodeSelect,
   onSimulateFile,
-  onContextMenu,
-  selectedFilePath, 
-  selectedNodeId, 
-  searchQuery, 
-  forceExpanded,
-  treeKey,
-  dirColorMap,
-  topLevelDirName
+  selectedFilePath,
+  selectedNodeId,
+  dirColorMap = {},
 }) {
-  const [isOpen, setIsOpen] = useState(depth < 2);
+  const nodes = graph?.nodes ?? [];
+  const tree = useMemo(() => buildTree(nodes), [nodes]);
+  const symbolsByFile = useMemo(() => {
+    const m = new Map();
+    for (const n of nodes) {
+      if (n.type !== 'function' && n.type !== 'class') continue;
+      if (!m.has(n.file)) m.set(n.file, []);
+      m.get(n.file).push(n);
+    }
+    for (const list of m.values()) list.sort((a, b) => (a.lines?.[0] || 0) - (b.lines?.[0] || 0));
+    return m;
+  }, [nodes]);
 
-  // Reset open state when treeKey changes (Collapse All)
+  const [expanded, setExpanded] = useState(() => initialExpanded(tree));
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [activeId, setActiveId] = useState(null);
+  const [menu, setMenu] = useState(null); // { x, y, path }
+  const treeRef = useRef(null);
+  const filterRef = useRef(null);
+
+  useEffect(() => setExpanded(initialExpanded(tree)), [tree]);
+
+  const rows = useMemo(
+    () => flattenRows({ tree, expanded, filter, selectedFilePath, symbolsByFile }),
+    [tree, expanded, filter, selectedFilePath, symbolsByFile],
+  );
+
+  // Keep the roving focus target valid and in sync with the selection
   useEffect(() => {
-    setIsOpen(depth < 2);
-  }, [treeKey, depth]);
+    const selectedRow =
+      (selectedNodeId && rows.find((r) => r.kind === 'symbol' && r.node.id === selectedNodeId)) ||
+      (selectedFilePath && rows.find((r) => r.kind === 'file' && r.path === selectedFilePath));
+    if (selectedRow) setActiveId(selectedRow.id);
+    else if (!rows.some((r) => r.id === activeId)) setActiveId(rows[0]?.id ?? null);
+  }, [rows, selectedNodeId, selectedFilePath]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isDir = node.__type === "dir";
-  const isFile = node.__type === "file";
-  const isSelected = isFile && selectedFilePath === node.__path;
+  const focusRow = useCallback((id) => {
+    setActiveId(id);
+    requestAnimationFrame(() => {
+      // Match on the dataset rather than a selector: ids contain paths and "::"
+      const rowsEls = treeRef.current?.querySelectorAll('[data-row-id]') ?? [];
+      [...rowsEls].find((el) => el.dataset.rowId === id)?.focus();
+    });
+  }, []);
 
-  // Filter out internal metadata keys
-  const childrenKeys = isDir ? Object.keys(node).filter(k => k !== "__type").sort((a, b) => {
-    const isDirA = node[a].__type === "dir";
-    const isDirB = node[b].__type === "dir";
-    if (isDirA && !isDirB) return -1;
-    if (!isDirA && isDirB) return 1;
-    return a.localeCompare(b);
-  }) : [];
+  const toggleDir = (path, open) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      const shouldOpen = open ?? !next.has(path);
+      if (shouldOpen) next.add(path);
+      else next.delete(path);
+      return next;
+    });
 
-  if (isDir) {
-    // If search is active, we rely on the parent (FileTree) having filtered the tree.
-    // So if this directory was kept in the tree, we render it.
-    const isEffectivelyOpen = isOpen || forceExpanded;
-    const currentTopLevelDirName = depth === 0 ? name : topLevelDirName;
-    const dirColor = dirColorMap ? dirColorMap[currentTopLevelDirName] : null;
+  const activate = (row) => {
+    if (row.kind === 'dir') toggleDir(row.path);
+    else if (row.kind === 'file') onFileSelect(row.path);
+    else onNodeSelect(row.node);
+  };
 
-    return (
-      <div>
-        <div 
-          style={{ paddingLeft: `${depth * 12 + 8}px` }}
-          className="flex items-center gap-1.5 h-8 cursor-pointer select-none hover:bg-surface-hover transition-colors group"
-          onClick={() => setIsOpen(v => !v)}
-          title={name}
-        >
-          <span className={`text-muted text-xs transition-transform duration-150 ${isEffectivelyOpen ? 'rotate-90' : 'rotate-0'}`}>
-            ▶
-          </span>
-          <span
-            className="w-2.5 h-2.5 rounded-sm flex-shrink-0"
-            style={{
-              backgroundColor: dirColor?.fill.replace("0.06", "0.3") ?? "transparent",
-              border: `1px solid ${dirColor?.stroke ?? "transparent"}`
-            }}
-          />
-          <span className="font-mono text-xs text-white/70 group-hover:text-white truncate">
-            {name}
-          </span>
-          {!isEffectivelyOpen && (
-            <span className="text-xs text-muted ml-auto mr-2">
-              {/* simple heuristic, exact nested count requires recursive sum, we just show folder indicator */}
-            </span>
-          )}
-        </div>
-        
-        {isEffectivelyOpen && childrenKeys.map(key => (
-          <TreeNode 
-            key={key} 
-            name={key} 
-            node={node[key]} 
-            depth={depth + 1}
-            allGraphNodes={allGraphNodes}
-            onFileSelect={onFileSelect}
-            onNodeSelect={onNodeSelect}
-            onSimulateFile={onSimulateFile}
-            onContextMenu={onContextMenu}
-            selectedFilePath={selectedFilePath}
-            selectedNodeId={selectedNodeId}
-            searchQuery={searchQuery}
-            forceExpanded={forceExpanded}
-            treeKey={treeKey}
-            dirColorMap={dirColorMap}
-            topLevelDirName={currentTopLevelDirName}
-          />
-        ))}
-      </div>
-    );
-  }
+  const openMenu = (row, x, y) => {
+    if (row.kind !== 'file') return;
+    setMenu({ x, y, path: row.path, rowId: row.id });
+  };
 
-  // File rendering
+  const handleKeyDown = (e) => {
+    const index = rows.findIndex((r) => r.id === activeId);
+    const row = rows[index];
+    if (!row) return;
+    const move = (i) => {
+      e.preventDefault();
+      const target = rows[Math.max(0, Math.min(rows.length - 1, i))];
+      if (target) focusRow(target.id);
+    };
+    switch (e.key) {
+      case 'ArrowDown':
+        return move(index + 1);
+      case 'ArrowUp':
+        return move(index - 1);
+      case 'Home':
+        return move(0);
+      case 'End':
+        return move(rows.length - 1);
+      case 'ArrowRight':
+        e.preventDefault();
+        if (row.kind === 'dir' && !row.expanded) toggleDir(row.path, true);
+        else if (row.expanded && rows[index + 1]?.parentId === row.id) focusRow(rows[index + 1].id);
+        else if (row.kind === 'file' && !row.expanded) onFileSelect(row.path);
+        return undefined;
+      case 'ArrowLeft':
+        e.preventDefault();
+        if (row.kind === 'dir' && row.expanded && !filter) toggleDir(row.path, false);
+        else if (row.parentId) focusRow(row.parentId);
+        return undefined;
+      case 'Enter':
+      case ' ':
+        e.preventDefault();
+        activate(row);
+        return undefined;
+      case 'ContextMenu':
+      case 'F10':
+        if (e.key === 'F10' && !e.shiftKey) return undefined;
+        e.preventDefault();
+        {
+          const rect = e.target.getBoundingClientRect();
+          openMenu(row, rect.left + 24, rect.bottom);
+        }
+        return undefined;
+      default:
+        return undefined;
+    }
+  };
+
+  const toggleFilter = () => {
+    if (filterOpen) {
+      setFilter('');
+      setFilterOpen(false);
+    } else {
+      setFilterOpen(true);
+      requestAnimationFrame(() => filterRef.current?.focus());
+    }
+  };
+
   return (
-    <div>
-      <div 
-        style={{ paddingLeft: `${depth * 12 + 8}px` }}
-        className={`flex items-center gap-1.5 h-7 cursor-pointer select-none transition-colors group relative ${isSelected ? "bg-accent/15 border-l-2 border-accent" : "hover:bg-surface-hover border-l-2 border-transparent"}`}
-        onClick={() => onFileSelect(node.__path)}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          if (onContextMenu) onContextMenu(e, node.__path);
-        }}
-        title={node.__path}
-      >
-        <span className="w-2 h-2 rounded-full flex-shrink-0 bg-node-file" />
-        
-        {searchQuery ? (
-          <span className={`font-mono text-xs truncate ${isSelected ? "text-white" : "text-white/60 group-hover:text-white/90"}`}>
-            {name.split(new RegExp(`(${searchQuery})`, 'gi')).map((part, i) => 
-              part.toLowerCase() === searchQuery.toLowerCase() 
-                ? <span key={i} className="text-accent bg-accent/10">{part}</span> 
-                : part
-            )}
-          </span>
-        ) : (
-          <span className={`font-mono text-xs truncate ${isSelected ? "text-white" : "text-white/60 group-hover:text-white/90"}`}>
-            {name}
-          </span>
-        )}
-
-        <div className={`ml-auto flex items-center gap-1 mr-2 transition-opacity ${isSelected ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
-          {node.__functionCount > 0 && <span className="text-[10px] text-node-function font-mono bg-node-function/10 px-1 rounded">{node.__functionCount}f</span>}
-          {node.__classCount > 0 && <span className="text-[10px] text-node-class font-mono bg-node-class/10 px-1 rounded">{node.__classCount}c</span>}
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-cg-raised font-cg-sans">
+      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-cg-border pl-3 pr-1.5">
+        <h2 className="text-cg-sm font-medium text-cg-text">Files</h2>
+        <div className="flex items-center">
+          <IconButton label={filterOpen ? 'Close filter' : 'Filter files'} size="sm" onClick={toggleFilter} aria-pressed={filterOpen}>
+            {filterOpen ? <X size={16} strokeWidth={1.5} aria-hidden="true" /> : <Search size={16} strokeWidth={1.5} aria-hidden="true" />}
+          </IconButton>
+          <IconButton label="Collapse all" size="sm" onClick={() => setExpanded(new Set())}>
+            <ChevronsDownUp size={16} strokeWidth={1.5} aria-hidden="true" />
+          </IconButton>
         </div>
+      </div>
 
-        {isSelected && (
-          <span className="text-[10px] text-muted mr-2">▼</span>
+      {filterOpen && (
+        <div className="shrink-0 border-b border-cg-border p-2">
+          <Input
+            ref={filterRef}
+            label="Filter files"
+            hideLabel
+            placeholder="Filter files"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.stopPropagation();
+                toggleFilter();
+              } else if (e.key === 'ArrowDown' && rows[0]) {
+                e.preventDefault();
+                focusRow(rows[0].id);
+              }
+            }}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </div>
+      )}
+
+      <div className="relative min-h-0 flex-1 overflow-y-auto py-1">
+        {rows.length === 0 ? (
+          <p className="px-3 py-6 text-cg-sm text-cg-tertiary">
+            {filter ? `No files match “${filter}”.` : 'No files in this analysis.'}
+          </p>
+        ) : (
+          <div ref={treeRef} role="tree" aria-label="Files" onKeyDown={handleKeyDown}>
+            {rows.map((row) => {
+              const isSelected =
+                (row.kind === 'symbol' && row.node.id === selectedNodeId) ||
+                (row.kind === 'file' && row.path === selectedFilePath && !rows.some((r) => r.kind === 'symbol' && r.node.id === selectedNodeId));
+              const clusterColor = row.kind === 'file' ? dirColorMap[getTopLevelDir(row.path)]?.stroke : null;
+              const Icon = row.kind === 'dir' ? (row.expanded ? FolderOpen : Folder) : File;
+              return (
+                <div
+                  key={row.id}
+                  role="treeitem"
+                  data-row-id={row.id}
+                  aria-level={row.depth + 1}
+                  aria-expanded={row.expanded}
+                  aria-selected={isSelected}
+                  tabIndex={row.id === activeId ? 0 : -1}
+                  title={row.kind === 'symbol' ? row.node.id : row.path}
+                  onClick={() => {
+                    setActiveId(row.id);
+                    activate(row);
+                  }}
+                  onContextMenu={(e) => {
+                    if (row.kind !== 'file') return;
+                    e.preventDefault();
+                    setActiveId(row.id);
+                    openMenu(row, e.clientX, e.clientY);
+                  }}
+                  onFocus={() => setActiveId(row.id)}
+                  style={{ paddingLeft: 8 + row.depth * 8 }}
+                  className={cn(
+                    'relative flex h-7 cursor-default select-none items-center gap-1.5 pr-2 text-cg-sm outline-none',
+                    'transition-colors duration-cg-fast ease-cg [@media(pointer:coarse)]:min-h-11',
+                    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-cg-focus',
+                    isSelected
+                      ? 'bg-cg-overlay text-cg-text before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-cg-text'
+                      : 'text-cg-secondary hover:bg-cg-hover hover:text-cg-text',
+                  )}
+                >
+                  {row.kind === 'symbol' ? (
+                    <span aria-hidden="true" className={cn('ml-[5px] mr-[3px] h-1.5 w-1.5 shrink-0 rounded-full', TYPE_DOT[row.node.type])} />
+                  ) : (
+                    <Icon size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-cg-tertiary" />
+                  )}
+                  <span className="min-w-0 truncate">{row.name}</span>
+                  {clusterColor && (
+                    <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: clusterColor }} />
+                  )}
+                  {row.kind === 'symbol' && row.node.lines?.[0] && (
+                    <span className="ml-auto shrink-0 text-cg-xs tabular-nums text-cg-tertiary">{row.node.lines[0]}</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 
-      {/* Sub-list of functions and classes when file is selected */}
-      {isSelected && (() => {
-        const childNodes = allGraphNodes.filter(
-          n => n.file === node.__path && (n.type === "function" || n.type === "class")
-        ).sort((a, b) => (a.lines?.[0] || 0) - (b.lines?.[0] || 0));
-
-        return childNodes.map(childNode => {
-          const isChildSelected = selectedNodeId === childNode.id;
-          const isClass = childNode.type === "class";
-          
-          return (
-            <div 
-              key={childNode.id}
-              style={{ paddingLeft: `${depth * 12 + 24}px` }}
-              className={`flex items-center gap-1.5 h-6 cursor-pointer select-none transition-colors group border-l border-accent/20 ${isChildSelected ? "bg-accent/10" : "hover:bg-surface/50"}`}
-              onClick={(e) => { e.stopPropagation(); onNodeSelect(childNode); }}
-              title={childNode.id}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isClass ? "bg-node-class" : "bg-node-function"}`} />
-              <span className={`font-mono text-[11px] truncate ${isChildSelected ? "text-accent" : "text-white/50 group-hover:text-white/80"}`}>
-                {childNode.label || childNode.id.split('::').pop()}
-              </span>
-              {childNode.lines?.[0] && (
-                <span className="text-[10px] text-muted font-mono ml-auto mr-2">
-                  :{childNode.lines[0]}
-                </span>
-              )}
-            </div>
-          );
-        });
-      })()}
+      {menu && (
+        <FileMenu
+          {...menu}
+          onClose={(restore) => {
+            setMenu(null);
+            if (restore) focusRow(menu.rowId);
+          }}
+          onShow={() => onFileSelect(menu.path)}
+          onSimulate={() => onSimulateFile?.(menu.path)}
+        />
+      )}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main FileTree Component
-// ---------------------------------------------------------------------------
-export default function FileTree({ 
-  graph,
-  onFileSelect, 
-  onNodeSelect, 
-  onSimulateFile,
-  selectedFilePath, 
-  selectedNodeId,
-  hidden,
-  onClose,
-  dirColorMap
-}) {
-  const [sidebarWidth, setSidebarWidth] = useState(260);
-  const [isResizing, setIsResizing] = useState(false);
-  const [allCollapsed, setAllCollapsed] = useState(false);
-  const [searchVisible, setSearchVisible] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [treeKey, setTreeKey] = useState(0);
-  const [contextMenu, setContextMenu] = useState(null);
-
-  // Close context menu on click outside
+/** Small context menu for a file row (role="menu", arrow keys, Esc). */
+function FileMenu({ x, y, onClose, onShow, onSimulate }) {
+  const ref = useRef(null);
   useEffect(() => {
-    const handleClick = () => setContextMenu(null);
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
+    ref.current?.querySelector('[role="menuitem"]')?.focus();
+    const onPointer = (e) => !ref.current?.contains(e.target) && onClose(false);
+    document.addEventListener('mousedown', onPointer);
+    return () => document.removeEventListener('mousedown', onPointer);
+  }, [onClose]);
 
-  // Resize handler
-  useEffect(() => {
-    if (!isResizing) return;
-    const handleMouseMove = (e) => {
-      setSidebarWidth(Math.min(Math.max(e.clientX, 180), 450));
-    };
-    const handleMouseUp = () => setIsResizing(false);
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [isResizing]);
-
-  // Handle global search shortcut if sidebar is hidden
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
-        if (!hidden) {
-          e.preventDefault();
-          setSearchVisible(true);
-          // Wait for render then focus
-          setTimeout(() => document.getElementById("file-tree-search")?.focus(), 50);
-        }
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [hidden]);
-
-  const handleCollapseAll = () => {
-    setTreeKey(k => k + 1); // Reset all TreeNode states
-  };
-
-  // Build full tree
-  const fullTree = useMemo(() => buildFileTree(graph), [graph]);
-
-  // Filter tree based on search
-  const filteredTree = useMemo(() => {
-    if (!searchQuery) return fullTree;
-    const query = searchQuery.toLowerCase();
-    
-    // Recursive filter
-    const filterNode = (node) => {
-      if (node.__type === "file") {
-        return node.__path.toLowerCase().includes(query) ? node : null;
-      }
-      
-      const result = { __type: "dir" };
-      let hasMatch = false;
-      
-      for (const [key, value] of Object.entries(node)) {
-        if (key === "__type") continue;
-        const filteredChild = filterNode(value);
-        if (filteredChild) {
-          result[key] = filteredChild;
-          hasMatch = true;
-        }
-      }
-      
-      return hasMatch ? result : null;
-    };
-    
-    const res = {};
-    for (const [key, value] of Object.entries(fullTree)) {
-      if (key === "__type") continue;
-      const filtered = filterNode(value);
-      if (filtered) res[key] = filtered;
-    }
-    return res;
-  }, [fullTree, searchQuery]);
-
-  const fileNodes = graph?.nodes?.filter(n => n.type === "file") || [];
-  const fnNodes = graph?.nodes?.filter(n => n.type === "function") || [];
-  const classNodes = graph?.nodes?.filter(n => n.type === "class") || [];
-
+  const items = [
+    ['Show in graph', <Crosshair key="i" size={16} strokeWidth={1.5} aria-hidden="true" />, onShow],
+    ['Simulate impact', <Zap key="i" size={16} strokeWidth={1.5} aria-hidden="true" />, onSimulate],
+  ];
   return (
-    <>
-      {/* Mobile Backdrop */}
-      <div 
-        className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-300 ${hidden ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-        onClick={onClose}
-      />
-      <div 
-        style={{ width: `${sidebarWidth}px` }} 
-        className={`fixed md:relative inset-y-0 left-0 z-50 flex-shrink-0 h-full bg-bg border-r border-border flex flex-col transition-transform duration-300 md:transition-none max-w-[85vw] ${hidden ? 'max-md:-translate-x-full md:hidden' : 'translate-x-0'}`}
-      >
-      {/* Header */}
-      <div className="h-12 flex-shrink-0 bg-surface border-b border-border px-3 flex items-center justify-between">
-        <span className="text-[10px] font-mono text-muted uppercase tracking-widest select-none">
-          Files
-        </span>
-        <div className="flex items-center gap-1">
-          <button 
-            onClick={handleCollapseAll}
-            className="w-6 h-6 flex items-center justify-center text-muted hover:text-white rounded hover:bg-surface-hover transition-colors text-xs"
-            title="Collapse All"
-          >
-            ⊟
-          </button>
-          <button 
-            onClick={() => {
-              setSearchVisible(!searchVisible);
-              if (!searchVisible) {
-                setTimeout(() => document.getElementById("file-tree-search")?.focus(), 50);
-              }
-            }}
-            className={`w-6 h-6 flex items-center justify-center rounded hover:bg-surface-hover transition-colors text-xs ${searchVisible ? "text-accent bg-accent/10" : "text-muted hover:text-white"}`}
-            title="Search Files (Cmd/Ctrl + F)"
-          >
-            ⌕
-          </button>
-        </div>
-      </div>
-
-      {/* Search Bar */}
-      <div className={`overflow-hidden transition-all duration-200 flex-shrink-0 ${searchVisible ? 'max-h-10 border-b border-border' : 'max-h-0 border-transparent'}`}>
-        <input
-          id="file-tree-search"
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Filter files..."
-          className="w-full h-9 bg-surface px-3 py-2 font-mono text-xs text-white placeholder:text-muted focus:outline-none focus:bg-surface-hover"
-          autoComplete="off"
-          spellCheck="false"
-        />
-      </div>
-
-      {/* Tree Body */}
-      <div className="flex-1 overflow-y-auto py-2">
-        {Object.keys(filteredTree).length === 0 ? (
-          <div className="px-4 py-8 text-center text-muted text-xs font-mono">
-            {searchQuery ? "No matching files found." : "No files available."}
-          </div>
-        ) : (
-          Object.keys(filteredTree).sort((a, b) => {
-            const isDirA = filteredTree[a].__type === "dir";
-            const isDirB = filteredTree[b].__type === "dir";
-            if (isDirA && !isDirB) return -1;
-            if (!isDirA && isDirB) return 1;
-            return a.localeCompare(b);
-          }).map(key => (
-            <TreeNode 
-              key={key} 
-              name={key} 
-              node={filteredTree[key]} 
-              depth={0} 
-              allGraphNodes={graph.nodes}
-              onFileSelect={onFileSelect}
-              onNodeSelect={onNodeSelect}
-              onSimulateFile={onSimulateFile}
-              onContextMenu={(e, path) => setContextMenu({ x: e.clientX, y: e.clientY, path })}
-              selectedFilePath={selectedFilePath}
-              selectedNodeId={selectedNodeId}
-              searchQuery={searchQuery}
-              forceExpanded={searchQuery.length > 0}
-              treeKey={treeKey}
-              dirColorMap={dirColorMap}
-              topLevelDirName={key}
-            />
-          ))
-        )}
-      </div>
-
-      {/* Footer Stats */}
-      <div className="h-8 flex-shrink-0 bg-surface border-t border-border px-3 flex items-center justify-between select-none">
-        <span className="text-[10px] font-mono text-muted">
-          {fileNodes.length} files · {fnNodes.length}f · {classNodes.length}c
-        </span>
-      </div>
-
-      {/* Resize Handle - Hidden on mobile */}
-      <div 
-        className="hidden md:block absolute right-0 top-0 h-full w-1 cursor-col-resize hover:bg-accent/40 transition-colors z-10"
-        onMouseDown={() => setIsResizing(true)}
-      />
-
-      {/* Context Menu */}
-      {contextMenu && (
-        <div 
-          className="fixed z-[9999] bg-surface border border-border rounded-lg shadow-xl py-1 min-w-[160px]"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-          onMouseDown={e => e.stopPropagation()}
+    <div
+      ref={ref}
+      role="menu"
+      aria-label="File actions"
+      style={{ top: Math.min(y, window.innerHeight - 96), left: Math.min(x, window.innerWidth - 200) }}
+      className="fixed z-[70] min-w-44 rounded-cg-control border border-cg-border bg-cg-overlay p-1 font-cg-sans shadow-cg-edge"
+      onKeyDown={(e) => {
+        const els = [...ref.current.querySelectorAll('[role="menuitem"]')];
+        const i = els.indexOf(document.activeElement);
+        if (e.key === 'Escape' || e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose(true);
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          els[(i + (e.key === 'ArrowDown' ? 1 : -1) + els.length) % els.length]?.focus();
+        }
+      }}
+    >
+      {items.map(([label, icon, action]) => (
+        <button
+          key={label}
+          type="button"
+          role="menuitem"
+          tabIndex={-1}
+          onClick={() => {
+            action();
+            onClose(false);
+          }}
+          className="flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left text-cg-sm text-cg-text outline-none hover:bg-cg-hover focus:bg-cg-hover [@media(pointer:coarse)]:min-h-11"
         >
-          <div 
-            className="px-3 py-1.5 text-xs font-mono text-white hover:bg-surface-hover cursor-pointer"
-            onClick={() => {
-              onFileSelect(contextMenu.path);
-              setContextMenu(null);
-            }}
-          >
-            Select in graph
-          </div>
-          <div className="h-px bg-border my-1" />
-          <div 
-            className="px-3 py-1.5 text-xs font-mono text-accent hover:bg-surface-hover cursor-pointer flex items-center gap-2"
-            onClick={() => {
-              if (onSimulateFile) onSimulateFile(contextMenu.path);
-              setContextMenu(null);
-            }}
-          >
-            <span>⚡</span> Simulate changes
-          </div>
-        </div>
-      )}
-      </div>
-    </>
+          <span className="text-cg-secondary">{icon}</span>
+          {label}
+        </button>
+      ))}
+    </div>
   );
 }

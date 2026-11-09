@@ -1,402 +1,307 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import hljs from 'highlight.js/lib/core';
 import python from 'highlight.js/lib/languages/python';
+import { ExternalLink, FileCode2, TriangleAlert, X } from 'lucide-react';
 import { fetchFileSource } from '../api';
+import { cn } from '../lib/cn';
+import { IconButton } from '../ui';
 
 hljs.registerLanguage('python', python);
 
-export default function CodeInspector({ 
-  filePath, 
-  graph, 
-  selectedNodeId, 
-  onClose, 
-  onNodeClick, 
-  onFileSelect, 
-  repo, 
-  commitSha 
+const LINE_HEIGHT = 21;
+// Minimap marks use the data palette (definitions, classes, imports)
+const MINIMAP = {
+  selected: 'rgba(237, 237, 239, 0.85)',
+  classDef: 'rgba(229, 165, 75, 0.7)',
+  defLine: 'rgba(157, 140, 242, 0.7)',
+  import: 'rgba(91, 141, 239, 0.45)',
+  text: 'rgba(237, 237, 239, 0.12)',
+};
+
+/**
+ * Code view: a resizable drawer over the bottom of the graph.
+ * @param {number} [props.focusLine] Scroll to this line (e.g. from a health issue).
+ */
+export default function CodeInspector({
+  filePath,
+  graph,
+  selectedNodeId,
+  onClose,
+  onNodeClick,
+  repo,
+  commitSha,
+  offline = false, // static demo: no backend, so no source fetch
+  focusLine,
 }) {
   const [inspectorHeight, setInspectorHeight] = useState(() => Math.floor(window.innerHeight * 0.45));
   const [isResizing, setIsResizing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [sourceCode, setSourceCode] = useState("");
-  const [hoveredLine, setHoveredLine] = useState(null);
+  const [sourceCode, setSourceCode] = useState('');
 
   const lineNumbersRef = useRef(null);
   const codeRef = useRef(null);
 
-  // ---------------------------------------------------------------------------
   // Resizing
-  // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!isResizing) return;
-    const handleMouseMove = (e) => {
-      const newHeight = window.innerHeight - e.clientY;
-      setInspectorHeight(Math.min(Math.max(newHeight, 200), window.innerHeight * 0.8));
+    if (!isResizing) return undefined;
+    const handleMove = (e) => {
+      const y = e.touches ? e.touches[0].clientY : e.clientY;
+      setInspectorHeight(Math.min(Math.max(window.innerHeight - y, 160), window.innerHeight * 0.8));
     };
-    const handleMouseUp = () => setIsResizing(false);
-    
-    document.addEventListener("mousemove", handleMouseMove);
-    document.addEventListener("mouseup", handleMouseUp);
+    const stop = () => setIsResizing(false);
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', stop);
+    document.addEventListener('touchmove', handleMove);
+    document.addEventListener('touchend', stop);
     return () => {
-      document.removeEventListener("mousemove", handleMouseMove);
-      document.removeEventListener("mouseup", handleMouseUp);
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', stop);
+      document.removeEventListener('touchmove', handleMove);
+      document.removeEventListener('touchend', stop);
     };
   }, [isResizing]);
 
-  // ---------------------------------------------------------------------------
-  // Fetch Source
-  // ---------------------------------------------------------------------------
+  // Fetch source
   useEffect(() => {
-    if (!filePath || !repo || !commitSha) return;
-    
+    if (offline || !filePath || !repo || !commitSha) return undefined;
     let isMounted = true;
-    const loadSource = async () => {
+    (async () => {
       setIsLoading(true);
       setError(null);
-      setSourceCode("");
-      
+      setSourceCode('');
       try {
         const res = await fetchFileSource(repo, commitSha, filePath);
-        if (isMounted) {
-          setSourceCode(res.content || "");
-        }
+        if (isMounted) setSourceCode(res.content || '');
       } catch (err) {
-        if (isMounted) {
-          setError(err.message);
-        }
+        if (isMounted) setError(err.message);
       } finally {
-        if (isMounted) {
-          setIsLoading(false);
-        }
+        if (isMounted) setIsLoading(false);
       }
+    })();
+    return () => {
+      isMounted = false;
     };
-    
-    loadSource();
-    return () => { isMounted = false; };
-  }, [filePath, repo, commitSha]);
+  }, [filePath, repo, commitSha, offline]);
 
-  // ---------------------------------------------------------------------------
-  // Graph Cross-referencing
-  // ---------------------------------------------------------------------------
-  const fileNodes = useMemo(() => {
-    return graph?.nodes.filter(n => n.file === filePath) || [];
-  }, [graph, filePath]);
+  // Graph cross-referencing
+  const fileNodes = useMemo(() => graph?.nodes.filter((n) => n.file === filePath) || [], [graph, filePath]);
+  const fileEdges = useMemo(
+    () =>
+      graph?.edges.filter((e) => {
+        const srcId = typeof e.source === 'object' ? e.source.id : e.source;
+        return srcId.startsWith(filePath);
+      }) || [],
+    [graph, filePath],
+  );
 
-  const fileEdges = useMemo(() => {
-    return graph?.edges.filter(e => {
-      const srcId = typeof e.source === 'object' ? e.source.id : e.source;
-      return srcId.startsWith(filePath);
-    }) || [];
-  }, [graph, filePath]);
-
-  const importsMap = useMemo(() => {
-    // simple map: lineNumber -> boolean (or module name)
-    const m = {};
-    for (const edge of fileEdges) {
-      if (edge.type === "imports") {
-        // Unfortunately, AST import line numbers might not be perfectly mapped in edges.
-        // For visual, we'll try to find "import" in the actual line text later.
-      }
-    }
-    return m; // Actually, we'll process imports per line directly via text content
-  }, [fileEdges]);
-
-  // Function / Class line ranges for highlighting
+  // Selected node: whole body; other definitions: their first line
   const highlightedRanges = useMemo(() => {
     const ranges = new Set();
     for (const node of fileNodes) {
       if (!node.lines || node.lines.length < 2) continue;
       const [start, end] = node.lines;
-      
-      if (node.id === selectedNodeId) {
-        // Selected: highlight full body
-        for (let l = start; l <= end; l++) ranges.add(l);
-      } else {
-        // Not selected: highlight only the definition line
-        ranges.add(start);
-      }
+      if (node.id === selectedNodeId) for (let l = start; l <= end; l++) ranges.add(l);
+      else ranges.add(start);
     }
     return ranges;
   }, [fileNodes, selectedNodeId]);
 
-  // Scroll to selected node
+  // Scroll to the selected node or a requested line
   useEffect(() => {
-    if (!selectedNodeId || !codeRef.current || !sourceCode) return;
-    const node = fileNodes.find(n => n.id === selectedNodeId);
-    if (!node || !node.lines || node.lines.length === 0) return;
-    
-    const targetLine = node.lines[0];
-    const targetScrollTop = Math.max(0, (targetLine - 5) * 21);
-    codeRef.current.scrollTo({ top: targetScrollTop, behavior: "smooth" });
-  }, [selectedNodeId, fileNodes, sourceCode]);
+    if (!codeRef.current || !sourceCode) return;
+    const node = selectedNodeId && fileNodes.find((n) => n.id === selectedNodeId);
+    const target = focusLine || node?.lines?.[0];
+    if (!target) return;
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    codeRef.current.scrollTo({ top: Math.max(0, (target - 5) * LINE_HEIGHT), behavior: reduce ? 'auto' : 'smooth' });
+  }, [selectedNodeId, fileNodes, sourceCode, focusLine]);
 
-  // ---------------------------------------------------------------------------
-  // Render Pre-processing
-  // ---------------------------------------------------------------------------
   const renderedLines = useMemo(() => {
     if (!sourceCode) return [];
-    const highlighted = hljs.highlight(sourceCode, { language: "python" });
-    const lines = highlighted.value.split('\n');
-    
-    // Call sites mapping (approximate based on function ranges)
+    const lines = hljs.highlight(sourceCode, { language: 'python' }).value.split('\n');
+
+    // Calls made from each definition, shown on its def line
     const callSitesByLine = {};
     for (const edge of fileEdges) {
-      if (edge.type === "calls") {
-        const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
-        const tgtId = typeof edge.target === 'object' ? edge.target.id : edge.target;
-        const callerNode = fileNodes.find(n => n.id === srcId);
-        
-        if (callerNode && callerNode.lines) {
-          // just attach it to the caller's def line for simplicity
-          const defLine = callerNode.lines[0];
-          if (!callSitesByLine[defLine]) callSitesByLine[defLine] = new Set();
-          callSitesByLine[defLine].add(tgtId.split("::").pop());
-        }
+      if (edge.type !== 'calls') continue;
+      const srcId = typeof edge.source === 'object' ? edge.source.id : edge.source;
+      const tgtId = typeof edge.target === 'object' ? edge.target.id : edge.target;
+      const caller = fileNodes.find((n) => n.id === srcId);
+      if (caller?.lines) {
+        const defLine = caller.lines[0];
+        (callSitesByLine[defLine] ??= new Set()).add(tgtId.split('::').pop());
       }
     }
 
     return lines.map((htmlStr, idx) => {
       const lineNum = idx + 1;
-      let lineHtml = htmlStr;
-
-      // 1. Clickable function/class names
+      let html = htmlStr;
+      // Clickable function/class names
       for (const node of fileNodes) {
-        if (node.type === "file") continue;
-        const label = node.label || node.id.split("::").pop();
-        if (label) {
-          const pattern = new RegExp(`(<span class="hljs-title">)(${label})(</span>)`, "g");
-          if (pattern.test(lineHtml)) {
-             lineHtml = lineHtml.replace(pattern, 
-              `$1<span class="codegraph-fn-link" data-id="${node.id}" style="cursor:pointer;border-bottom:1px dotted currentColor; pointer-events: auto;">$2</span>$3`
-            );
-          }
-        }
+        if (node.type === 'file') continue;
+        const label = node.label || node.id.split('::').pop();
+        if (!label) continue;
+        const pattern = new RegExp(`(<span class="hljs-title[^"]*">)(${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(</span>)`, 'g');
+        html = html.replace(
+          pattern,
+          `$1<span class="codegraph-fn-link" data-id="${node.id}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">$2</span>$3`,
+        );
       }
-
-      // 2. Identify imports
-      const isImport = lineHtml.includes('<span class="hljs-keyword">import</span>') || 
-                       lineHtml.includes('<span class="hljs-keyword">from</span>');
-      
-      const calls = callSitesByLine[lineNum] ? Array.from(callSitesByLine[lineNum]) : [];
-
       return {
         lineNum,
-        html: lineHtml,
-        isImport,
-        calls,
-        isHighlighted: highlightedRanges.has(lineNum),
-        isDefLine: fileNodes.some(n => n.lines && n.lines[0] === lineNum),
-        isClassDef: fileNodes.some(n => n.type === "class" && n.lines && n.lines[0] === lineNum)
+        html,
+        isImport: html.includes('<span class="hljs-keyword">import</span>') || html.includes('<span class="hljs-keyword">from</span>'),
+        calls: callSitesByLine[lineNum] ? [...callSitesByLine[lineNum]] : [],
+        isHighlighted: highlightedRanges.has(lineNum) || lineNum === focusLine,
+        isDefLine: fileNodes.some((n) => n.lines && n.lines[0] === lineNum),
+        isClassDef: fileNodes.some((n) => n.type === 'class' && n.lines && n.lines[0] === lineNum),
       };
     });
-  }, [sourceCode, fileNodes, fileEdges, highlightedRanges]);
+  }, [sourceCode, fileNodes, fileEdges, highlightedRanges, focusLine]);
 
-  // ---------------------------------------------------------------------------
-  // Sync Scroll
-  // ---------------------------------------------------------------------------
-  const handleScroll = (e) => {
-    const target = e.target;
-    if (target === codeRef.current && lineNumbersRef.current) {
-      lineNumbersRef.current.scrollTop = target.scrollTop;
-    } else if (target === lineNumbersRef.current && codeRef.current) {
-      codeRef.current.scrollTop = target.scrollTop;
-    }
+  const syncScroll = (e) => {
+    if (e.target === codeRef.current && lineNumbersRef.current) lineNumbersRef.current.scrollTop = e.target.scrollTop;
   };
 
-  // ---------------------------------------------------------------------------
-  // Click Handlers
-  // ---------------------------------------------------------------------------
   const handleCodeClick = (e) => {
-    const link = e.target.closest("[data-id]");
+    const link = e.target.closest('[data-id]');
     if (!link) return;
-    const nodeId = link.dataset.id;
-    const node = graph?.nodes.find(n => n.id === nodeId);
-    if (node && onNodeClick) {
-      onNodeClick(node);
-    }
+    const node = graph?.nodes.find((n) => n.id === link.dataset.id);
+    if (node) onNodeClick?.(node);
   };
 
   const handleMinimapClick = (e) => {
-    if (!codeRef.current || renderedLines.length === 0) return;
+    if (!codeRef.current || !renderedLines.length) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = (e.clientY - rect.top) / rect.height;
-    const targetLine = Math.floor(ratio * renderedLines.length);
-    codeRef.current.scrollTop = targetLine * 21;
+    codeRef.current.scrollTop = Math.floor(((e.clientY - rect.top) / rect.height) * renderedLines.length) * LINE_HEIGHT;
   };
 
-  // ---------------------------------------------------------------------------
-  // UI Components
-  // ---------------------------------------------------------------------------
   if (!filePath) return null;
 
-  const fnCount = fileNodes.filter(n => n.type === "function").length;
-  const classCount = fileNodes.filter(n => n.type === "class").length;
-  const totalLines = renderedLines.length;
+  const fnCount = fileNodes.filter((n) => n.type === 'function').length;
+  const classCount = fileNodes.filter((n) => n.type === 'class').length;
+  const parts = filePath.split('/');
 
   return (
-    <div 
-      className="absolute bottom-0 left-0 right-0 bg-bg border-t border-border flex flex-col z-20 animate-slide-up shadow-2xl"
-      style={{ height: `${inspectorHeight}px` }}
+    <section
+      aria-label={`Code view: ${filePath}`}
+      className="absolute inset-x-0 bottom-0 z-20 flex flex-col border-t border-cg-border bg-cg-raised font-cg-sans shadow-cg-edge"
+      style={{ height: inspectorHeight }}
     >
-      {/* Resize Handle */}
-      <div 
-        className="w-full h-1 cursor-ns-resize bg-border hover:bg-accent/60 transition-colors flex-shrink-0"
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize code view"
+        tabIndex={0}
         onMouseDown={() => setIsResizing(true)}
+        onTouchStart={() => setIsResizing(true)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowUp') setInspectorHeight((h) => Math.min(h + 24, window.innerHeight * 0.8));
+          if (e.key === 'ArrowDown') setInspectorHeight((h) => Math.max(h - 24, 160));
+        }}
+        className="group flex h-2 shrink-0 cursor-ns-resize items-center justify-center outline-none focus-visible:bg-cg-hover"
       >
-        <div className="w-8 h-0.5 bg-[#4b5563] rounded-full mx-auto mt-[1px]" />
+        <span className="h-0.5 w-8 rounded-full bg-cg-border-strong group-hover:bg-cg-secondary" />
       </div>
 
-      {/* Header */}
-      <div className="h-10 flex-shrink-0 bg-surface border-b border-border px-4 flex items-center gap-3">
-        <div className="w-2 h-2 rounded-full bg-node-file flex-shrink-0" />
-        <div className="flex items-center">
-          {filePath.split("/").map((part, i, arr) => (
-            <span key={i} className="flex items-center">
-              <span className={`font-mono text-xs ${i === arr.length - 1 ? "text-white font-medium" : "text-muted hover:text-white cursor-pointer"}`}>
-                {part}
-              </span>
-              {i < arr.length - 1 && <span className="text-border font-mono text-xs mx-0.5">/</span>}
+      <header className="flex h-10 shrink-0 items-center gap-3 border-b border-cg-border px-3">
+        <FileCode2 size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-cg-tertiary" />
+        <p className="min-w-0 flex-1 truncate font-cg-mono text-cg-xs" title={filePath}>
+          {parts.slice(0, -1).map((p, i) => (
+            <span key={i} className="text-cg-tertiary">
+              {p}/
             </span>
           ))}
-        </div>
-
-        <div className="ml-auto flex items-center gap-4">
-          <span className="text-xs font-mono text-muted">{totalLines > 0 ? `${totalLines} lines` : ""}</span>
-          {fnCount > 0 && <span className="text-xs font-mono text-purple-400">{fnCount} functions</span>}
-          {classCount > 0 && <span className="text-xs font-mono text-amber-400">{classCount} classes</span>}
-        </div>
-
-        <a
-          href={`https://github.com/${repo}/blob/${commitSha}/${filePath}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-muted hover:text-white text-sm transition-colors cursor-pointer ml-2"
-          title="Open in GitHub"
+          <span className="text-cg-text">{parts.at(-1)}</span>
+        </p>
+        <p className="hidden shrink-0 gap-3 text-cg-xs tabular-nums text-cg-tertiary sm:flex">
+          {renderedLines.length > 0 && <span>{renderedLines.length} lines</span>}
+          {fnCount > 0 && <span>{fnCount} functions</span>}
+          {classCount > 0 && <span>{classCount} classes</span>}
+        </p>
+        <IconButton
+          label="Open on GitHub"
+          size="sm"
+          onClick={() => window.open(`https://github.com/${repo}/blob/${commitSha}/${filePath}`, '_blank', 'noopener,noreferrer')}
         >
-          ↗
-        </a>
-        <button
-          onClick={onClose}
-          className="w-7 h-7 flex items-center justify-center text-muted hover:text-white rounded hover:bg-surface-hover transition-colors ml-1 text-lg leading-none pb-0.5"
-        >
-          ×
-        </button>
-      </div>
+          <ExternalLink size={16} strokeWidth={1.5} aria-hidden="true" />
+        </IconButton>
+        <IconButton label="Close code view" shortcut="Esc" size="sm" onClick={onClose}>
+          <X size={16} strokeWidth={1.5} aria-hidden="true" />
+        </IconButton>
+      </header>
 
-      {/* Body */}
-      {isLoading && (
-        <div className="flex-1 flex items-center justify-center bg-bg">
-          <div className="text-center space-y-3">
-            <div className="w-5 h-5 border-2 border-accent border-t-transparent rounded-full animate-spin mx-auto" />
-            <div className="text-xs font-mono text-muted">Loading source...</div>
-          </div>
+      {offline && (
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center">
+          <FileCode2 size={24} strokeWidth={1.5} aria-hidden="true" className="text-cg-tertiary" />
+          <p className="mt-2 text-cg-sm text-cg-text">Source is available on your own analyses</p>
+          <p className="text-cg-xs text-cg-secondary">The demo includes the graph, not the files.</p>
         </div>
       )}
 
-      {error && !isLoading && (
-        <div className="flex-1 flex items-center justify-center bg-bg">
-          <div className="text-center space-y-2">
-            <div className="text-2xl">⚠️</div>
-            <div className="text-xs font-mono text-error">Could not load source for {filePath}</div>
-            <div className="text-xs font-mono text-muted max-w-xs mx-auto">
-              Source files are only available during the session. Re-analyze the repo to reload.
-            </div>
-          </div>
+      {!offline && isLoading && (
+        <div className="flex flex-1 flex-col gap-2 overflow-hidden p-4" aria-busy="true" aria-label="Loading source">
+          {[72, 48, 88, 60, 30, 80, 54, 66].map((w, i) => (
+            <div key={i} className="h-3 rounded bg-cg-hover" style={{ width: `${w}%` }} />
+          ))}
         </div>
       )}
 
-      {!isLoading && !error && sourceCode && (
-        <div className="flex-1 overflow-hidden flex relative">
-          
-          {/* Line Numbers */}
-          <div 
-            ref={lineNumbersRef}
-            className="w-10 overflow-y-auto flex-shrink-0 bg-surface/30 border-r border-border hide-scrollbar"
-            onScroll={handleScroll}
-            style={{ paddingBottom: '50px' }} // extra padding for overscroll
-          >
-            {renderedLines.map(l => (
-              <div 
-                key={l.lineNum} 
-                className="h-[21px] flex items-center justify-end pr-3 font-mono text-xs text-muted select-none"
-              >
+      {!offline && error && !isLoading && (
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center">
+          <TriangleAlert size={24} strokeWidth={1.5} aria-hidden="true" className="text-cg-tertiary" />
+          <p className="mt-2 text-cg-sm text-cg-text">Couldn&apos;t load {parts.at(-1)}</p>
+          <p className="max-w-xs text-cg-xs text-cg-secondary">Source files are kept for the session only. Re-run the analysis to load them again.</p>
+        </div>
+      )}
+
+      {!offline && !isLoading && !error && sourceCode && (
+        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+          <div ref={lineNumbersRef} aria-hidden="true" className="w-11 shrink-0 overflow-hidden border-r border-cg-border bg-cg-raised pb-12">
+            {renderedLines.map((l) => (
+              <div key={l.lineNum} className="flex h-[21px] items-center justify-end pr-3 font-cg-mono text-cg-xs text-cg-tertiary">
                 {l.lineNum}
               </div>
             ))}
           </div>
 
-          {/* Code */}
-          <div 
-            ref={codeRef}
-            className="flex-1 overflow-auto relative bg-bg"
-            onScroll={handleScroll}
-            onClick={handleCodeClick}
-            style={{ paddingBottom: '50px' }}
-          >
-            {renderedLines.map(l => (
+          <div ref={codeRef} className="relative flex-1 overflow-auto bg-cg-canvas pb-12" onScroll={syncScroll} onClick={handleCodeClick}>
+            {renderedLines.map((l) => (
               <div
                 key={l.lineNum}
-                className={`
-                  h-[21px] px-4 font-mono text-xs leading-[21px] whitespace-pre relative group flex items-center
-                  ${l.isHighlighted ? "bg-accent/10 border-l-2 border-accent" : "border-l-2 border-transparent"}
-                  ${hoveredLine === l.lineNum ? "bg-surface-hover" : ""}
-                  ${l.isImport ? "border-l-2 !border-blue-500/50 bg-blue-500/5" : ""}
-                `}
-                onMouseEnter={() => setHoveredLine(l.lineNum)}
-                onMouseLeave={() => setHoveredLine(null)}
+                className={cn(
+                  'group relative flex h-[21px] items-center whitespace-pre border-l-2 px-4 font-cg-mono text-cg-xs leading-[21px] hover:bg-cg-hover',
+                  l.isHighlighted ? 'border-cg-text bg-cg-hover' : 'border-transparent',
+                )}
               >
-                <div 
-                  className="flex-1 overflow-hidden text-ellipsis"
-                  dangerouslySetInnerHTML={{ __html: l.html || " " }} 
-                />
-                
+                <div className="flex-1 overflow-hidden text-ellipsis" dangerouslySetInnerHTML={{ __html: l.html || ' ' }} />
                 {l.calls.length > 0 && (
-                  <div className="absolute right-4 top-0 h-full flex items-center opacity-0 group-hover:opacity-100 transition-opacity bg-surface-hover/80 pl-2 backdrop-blur-sm pointer-events-none">
-                    <span className="text-xs font-mono text-accent/80">→ {l.calls.join(", ")}</span>
-                  </div>
+                  <span className="pointer-events-none absolute right-4 hidden h-full items-center bg-cg-hover pl-2 text-cg-xs text-cg-secondary group-hover:flex">
+                    calls {l.calls.join(', ')}
+                  </span>
                 )}
               </div>
             ))}
           </div>
 
-          {/* Minimap */}
-          <div 
-            className="hidden md:block w-[60px] flex-shrink-0 bg-surface/20 border-l border-border relative cursor-pointer"
+          <div
+            aria-hidden="true"
+            className="relative hidden w-14 shrink-0 cursor-pointer border-l border-cg-border bg-cg-raised md:block"
             onClick={handleMinimapClick}
           >
-            {renderedLines.map(l => {
-              let color = "rgba(226, 232, 240, 0.15)"; // default
-              if (l.isHighlighted && selectedNodeId) color = "rgba(124, 58, 237, 0.9)"; // selected
-              else if (l.isClassDef) color = "rgba(245, 158, 11, 0.6)";
-              else if (l.isDefLine) color = "rgba(124, 58, 237, 0.6)";
-              else if (l.isImport) color = "rgba(59, 130, 246, 0.4)";
-              else if (l.html.trim() === "") color = "transparent";
-
-              return (
-                <div 
-                  key={l.lineNum}
-                  style={{ 
-                    height: `${Math.max(1, inspectorHeight / totalLines)}px`,
-                    backgroundColor: color,
-                    width: '100%'
-                  }}
-                />
-              );
+            {renderedLines.map((l) => {
+              let color = MINIMAP.text;
+              if (l.isHighlighted && selectedNodeId) color = MINIMAP.selected;
+              else if (l.isClassDef) color = MINIMAP.classDef;
+              else if (l.isDefLine) color = MINIMAP.defLine;
+              else if (l.isImport) color = MINIMAP.import;
+              else if (!l.html.trim()) color = 'transparent';
+              return <div key={l.lineNum} style={{ height: Math.max(1, inspectorHeight / renderedLines.length), backgroundColor: color }} />;
             })}
-            
-            {/* Viewport Indicator - highly simplified based on scroll */}
-            <div 
-              className="absolute left-0 right-0 bg-white/10 border border-white/20 pointer-events-none transition-all duration-75"
-              style={{
-                top: codeRef.current ? `${(codeRef.current.scrollTop / codeRef.current.scrollHeight) * 100}%` : '0%',
-                height: codeRef.current ? `${(codeRef.current.clientHeight / codeRef.current.scrollHeight) * 100}%` : '10%'
-              }}
-            />
           </div>
-
         </div>
       )}
-    </div>
+    </section>
   );
 }

@@ -3,32 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CodeGraph — Understand any codebase instantly</title>
-    
-    <meta name="description" content="Paste a GitHub URL. CodeGraph analyzes the repo with AI and renders every function and class as an interactive knowledge graph. Free. No signup.">
-    <meta name="keywords" content="code visualization, codebase explorer, GitHub repo analyzer, knowledge graph, AI code understanding">
+    <title>CodeGraph — Map any Python codebase</title>
+    <meta name="description" content="Paste a GitHub repo. CodeGraph parses Python with tree-sitter, maps every call and import as a graph, and lets you ask questions about the code. Free and open source." />
+    <meta name="theme-color" content="#0A0A0B" />
 
     <!-- Open Graph -->
-    <meta property="og:title" content="CodeGraph">
-    <meta property="og:description" content="Understand any GitHub repo in seconds with an AI-powered knowledge graph">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://your-vercel-app.vercel.app">
-    <meta property="og:image" content="/og-image.png">
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="CodeGraph" />
+    <meta property="og:url" content="https://code-graph-ashy.vercel.app/" />
+    <meta property="og:title" content="CodeGraph — Map any Python codebase" />
+    <meta property="og:description" content="Paste a GitHub repo. CodeGraph maps every call and import in a Python codebase and lets you ask questions about the code." />
+    <meta property="og:image" content="https://code-graph-ashy.vercel.app/og-image.png" />
 
     <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="CodeGraph">
-    <meta name="twitter:description" content="Understand any GitHub repo in seconds">
-    
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕸️</text></svg>">
-    
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="CodeGraph — Map any Python codebase" />
+    <meta name="twitter:description" content="Paste a GitHub repo. CodeGraph maps every call and import in a Python codebase and lets you ask questions about the code." />
+    <meta name="twitter:image" content="https://code-graph-ashy.vercel.app/og-image.png" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- JetBrains Mono: only the graph canvas labels still draw with it (moves to Geist Mono in step 4b) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     
     <style>
       html, body {
-        background-color: #0a0a0f;
+        background-color: #0A0A0B;
+        color: #EDEDEF;
         margin: 0;
         padding: 0;
       }

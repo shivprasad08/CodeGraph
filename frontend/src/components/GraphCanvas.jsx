@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { groupNodesByDirectory, getTopLevelDir } from '../utils/directoryColors';
 import { computeConvexHull, expandHull, drawRoundedHull } from '../utils/hullUtils';
@@ -18,11 +18,19 @@ function computeNodeSize(node) {
   return Math.min(Math.max(size, 2), 20); // Clamp between 2 and 20
 }
 
+// Colours the canvas draws with (the legend reads these so it always matches)
+export const NODE_COLORS = {
+  entry: "#22c55e",    // green
+  file: "#3b82f6",     // blue
+  class: "#f59e0b",    // amber
+  function: "#7c3aed", // purple
+};
+
 function computeNodeColor(node) {
-  if (node.is_entry_point) return "#22c55e"; // green
-  if (node.type === 'file') return "#3b82f6"; // blue
-  if (node.type === 'class') return "#f59e0b"; // amber
-  return "#7c3aed"; // function node - purple
+  if (node.is_entry_point) return NODE_COLORS.entry;
+  if (node.type === 'file') return NODE_COLORS.file;
+  if (node.type === 'class') return NODE_COLORS.class;
+  return NODE_COLORS.function;
 }
 
 function computeEdgeColor(type) {
@@ -44,8 +52,14 @@ function computeEdgeWidth(type) {
 // ---------------------------------------------------------------------------
 // GraphCanvas Component
 // ---------------------------------------------------------------------------
-export default function GraphCanvas({ 
-  graph, 
+const NO_HIDDEN_DIRS = new Set();
+
+/**
+ * Force-directed graph. Ref API: zoomIn(), zoomOut(), zoomToFit(), getZoom().
+ * Legend state (cluster hulls, hidden directories) is controlled by the parent.
+ */
+const GraphCanvas = forwardRef(function GraphCanvas({
+  graph,
   onNodeClick, 
   selectedNodeId, 
   highlightedNodeIds = new Set(),
@@ -54,17 +68,25 @@ export default function GraphCanvas({
   dirColorMap = {},
   blastRadius = null,
   simulationMode = false,
-  onExitSimulation
-}) {
+  onExitSimulation,
+  hullsVisible = true,
+  hiddenDirs = NO_HIDDEN_DIRS,
+  onZoom,
+}, ref) {
   const fgRef = useRef();
+
+  useImperativeHandle(ref, () => ({
+    zoomIn: () => fgRef.current?.zoom(fgRef.current.zoom() * 1.4, 300),
+    zoomOut: () => fgRef.current?.zoom(fgRef.current.zoom() / 1.4, 300),
+    zoomToFit: () => fgRef.current?.zoomToFit(400, 40),
+    getZoom: () => fgRef.current?.zoom() ?? 1,
+  }), []);
   const containerRef = useRef();
   
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const [simulationDone, setSimulationDone] = useState(false);
   
-  const [hullsVisible, setHullsVisible] = useState(true);
   const [hullOpacity, setHullOpacity] = useState(0);
-  const [hiddenDirs, setHiddenDirs] = useState(new Set());
   
   const cachedHulls = useRef(null);
   const cachedHullsForced = useRef(false);
@@ -211,7 +233,7 @@ export default function GraphCanvas({
   // Empty state check
   if (!graph || graph.nodes?.length === 0) {
     return (
-      <div className="w-full h-full flex items-center justify-center text-muted font-mono text-sm">
+      <div className="flex h-full w-full items-center justify-center p-6 text-center font-cg-sans text-cg-sm text-cg-tertiary">
         No nodes to display. The repo may be empty or unparseable.
       </div>
     );
@@ -613,140 +635,56 @@ export default function GraphCanvas({
         cooldownTicks={200}
         warmupTicks={50}
         onEngineStop={() => setSimulationDone(true)}
+        onZoom={onZoom ? ({ k }) => onZoom(k) : undefined}
       />
 
       {/* Loading Overlay */}
       {!simulationDone && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="bg-surface/80 backdrop-blur rounded-lg px-4 py-2 flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-accent animate-pulse"></div>
-            <span className="font-mono text-sm text-muted">Simulating layout...</span>
-          </div>
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <p role="status" className="rounded-cg-control border border-cg-border bg-cg-overlay px-3 py-1.5 font-cg-sans text-cg-sm text-cg-secondary">
+            Laying out the graph…
+          </p>
         </div>
       )}
 
-      {/* Graph Controls Overlay */}
-      <div className="absolute bottom-4 left-4 z-10 bg-surface/80 backdrop-blur border border-border rounded-lg p-1 space-y-1">
-        <button 
-          onClick={() => fgRef.current?.zoom(fgRef.current.zoom() * 1.4, 300)}
-          className="w-8 h-8 flex items-center justify-center text-muted hover:text-white hover:bg-surface-hover rounded transition-colors text-sm font-mono font-bold"
-          title="Zoom In"
-        >
-          +
-        </button>
-        <button 
-          onClick={() => fgRef.current?.zoom(fgRef.current.zoom() / 1.4, 300)}
-          className="w-8 h-8 flex items-center justify-center text-muted hover:text-white hover:bg-surface-hover rounded transition-colors text-sm font-mono font-bold"
-          title="Zoom Out"
-        >
-          −
-        </button>
-        <button 
-          onClick={() => fgRef.current?.zoomToFit(400, 40)}
-          className="w-8 h-8 flex items-center justify-center text-muted hover:text-white hover:bg-surface-hover rounded transition-colors text-sm font-mono font-bold"
-          title="Fit All"
-        >
-          ⊡
-        </button>
-        <button 
-          onClick={() => setHullsVisible(v => !v)}
-          className={`w-8 h-8 flex items-center justify-center rounded transition-colors text-lg ${hullsVisible ? 'text-accent text-[#7c3aed]' : 'text-muted hover:text-white hover:bg-surface-hover'}`}
-          title={hullsVisible ? "Hide directory clusters" : "Show directory clusters"}
-        >
-          ⬡
-        </button>
-      </div>
-
-      {/* Legend Overlay */}
-      <div className="absolute bottom-4 right-4 z-10 bg-surface/80 backdrop-blur border border-border rounded-lg px-3 py-2 text-xs font-mono space-y-1.5 min-w-[140px]">
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full inline-block bg-[#3b82f6]"></span>
-          <span className="text-muted">File</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full inline-block bg-[#7c3aed]"></span>
-          <span className="text-muted">Function</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full inline-block bg-[#f59e0b]"></span>
-          <span className="text-muted">Class</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full inline-block bg-[#22c55e]"></span>
-          <span className="text-muted">Entry point</span>
-        </div>
-        
-        {Object.keys(dirColorMap).length > 0 && (
-          <>
-            <div className="border-t border-border border-[#1e1e2e] mt-2 pt-2 mb-1">
-              <span className="text-[10px] font-mono text-muted text-[#94a3b8] uppercase tracking-wider">CLUSTERS</span>
-            </div>
-            {Object.keys(dirColorMap).sort().slice(0, 8).map(dir => {
-              const color = dirColorMap[dir];
-              const isHidden = hiddenDirs.has(dir);
-              return (
-                <div 
-                  key={dir} 
-                  className={`flex items-center gap-2 py-0.5 cursor-pointer hover:opacity-80 transition-opacity ${isHidden ? 'opacity-40' : ''}`}
-                  onClick={() => {
-                    const next = new Set(hiddenDirs);
-                    if (next.has(dir)) next.delete(dir);
-                    else next.add(dir);
-                    setHiddenDirs(next);
-                  }}
-                >
-                  <span 
-                    className="w-3 h-3 rounded-sm border flex-shrink-0"
-                    style={{
-                      backgroundColor: color.fill.replace("0.06", "0.4"),
-                      borderColor: color.stroke.replace("0.35", "0.8").replace("0.30", "0.8")
-                    }}
-                  ></span>
-                  <span className={`text-muted text-[#94a3b8] ${isHidden ? 'line-through' : ''}`}>
-                    {dir === "__root__" ? "root files" : dir + "/"}
-                  </span>
-                  <span className="ml-auto text-[#94a3b8]">
-                    {dirGroups[dir]?.length || 0} nodes
-                  </span>
-                </div>
-              );
-            })}
-            {Object.keys(dirColorMap).length > 8 && (
-              <div className="text-[10px] text-muted text-[#94a3b8] pt-1">
-                + {Object.keys(dirColorMap).length - 8} more
-              </div>
-            )}
-          </>
-        )}
-      </div>
-      
       {/* Simulation Overlay Stats */}
       {simulationMode && blastRadius && (
-        <div className="absolute bottom-0 left-0 right-0 h-10 bg-bg/90 backdrop-blur border-t border-border flex items-center justify-between px-6 z-20">
-          <div className="text-xs font-mono text-white">
-            Simulating changes to: {(() => {
-              const srcEntry = [...blastRadius.affected.entries()].find(([_, d]) => d.severity === "source");
-              const srcId = srcEntry ? srcEntry[0] : "unknown";
-              const srcNode = graph?.nodes?.find(n => n.id === srcId);
-              return srcNode?.label || srcId;
-            })()}
-          </div>
-          
-          <div className="flex items-center gap-3">
-            <span className="text-red-400 font-mono text-xs">{blastRadius.stats.bySeverity.critical || 0} critical</span>
-            <span className="text-orange-400 font-mono text-xs">{blastRadius.stats.bySeverity.high || 0} high</span>
-            <span className="text-yellow-400 font-mono text-xs">{blastRadius.stats.bySeverity.medium || 0} medium</span>
-            <span className="text-muted font-mono text-xs">{blastRadius.stats.total || 0} total affected</span>
-          </div>
-          
-          <div 
-            className="text-muted font-mono text-xs hover:text-white cursor-pointer"
+        <div className="absolute inset-x-3 bottom-3 z-20 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-cg-control border border-cg-border bg-cg-overlay px-3 py-2 font-cg-sans text-cg-xs shadow-cg-edge">
+          <p className="min-w-0 truncate text-cg-secondary">
+            Simulating changes to{' '}
+            <span className="font-cg-mono text-cg-text">
+              {(() => {
+                const srcEntry = [...blastRadius.affected.entries()].find(([_, d]) => d.severity === "source");
+                const srcId = srcEntry ? srcEntry[0] : "unknown";
+                const srcNode = graph?.nodes?.find(n => n.id === srcId);
+                return srcNode?.label || srcId;
+              })()}
+            </span>
+          </p>
+          <p className="flex items-center gap-3 text-cg-secondary">
+            {[
+              ['critical', 'bg-cg-sev-high', blastRadius.stats.bySeverity.critical],
+              ['high', 'bg-cg-sev-med', blastRadius.stats.bySeverity.high],
+              ['medium', 'bg-cg-sev-low', blastRadius.stats.bySeverity.medium],
+            ].map(([label, dot, n]) => (
+              <span key={label} className="inline-flex items-center gap-1.5">
+                <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+                <span className="font-cg-mono text-cg-text">{n || 0}</span> {label}
+              </span>
+            ))}
+            <span><span className="font-cg-mono text-cg-text">{blastRadius.stats.total || 0}</span> total</span>
+          </p>
+          <button
+            type="button"
             onClick={onExitSimulation}
+            className="rounded px-1 text-cg-secondary transition-colors hover:text-cg-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cg-focus"
           >
-            Exit simulation ×
-          </div>
+            Exit simulation
+          </button>
         </div>
       )}
     </div>
   );
-}
+});
+
+export default GraphCanvas;

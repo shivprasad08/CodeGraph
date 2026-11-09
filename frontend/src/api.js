@@ -88,11 +88,23 @@ export async function fetchFileSource(repoFullName, commitSha, filePath) {
   return res.json();
 }
 
+/**
+ * Streams a chat answer. Returns a function that stops the stream; stopping
+ * calls onDone with the references received so far instead of onError.
+ */
 export function streamChatMessage(repoFullName, commitSha, message, history, onToken, onDone, onError) {
+  const controller = new AbortController();
+  let finished = false;
+  const done = (nodes) => {
+    if (finished) return;
+    finished = true;
+    onDone(nodes);
+  };
   fetch(`${BASE_URL}/chat/${repoFullName}/${commitSha}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, history })
+    body: JSON.stringify({ message, history }),
+    signal: controller.signal,
   })
   .then(async res => {
     if (!res.ok) {
@@ -120,7 +132,7 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
               if (data.token) {
                 onToken(data.token);
               }
-              onDone(data.nodes || []);
+              done(data.nodes || []);
             } else {
               onToken(data.token);
             }
@@ -130,9 +142,13 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
         }
       }
     }
-    readStream();
+    return readStream();
   })
-  .catch(err => onError(err.message));
+  .catch(err => {
+    if (err?.name === "AbortError") done([]);
+    else onError(err.message);
+  });
+  return () => controller.abort();
 }
 
 export async function fetchChatSuggestions(repoFullName, commitSha) {

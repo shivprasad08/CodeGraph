@@ -6,6 +6,8 @@
 
 @layer base {
   * { box-sizing: border-box; }
+  /* Page defaults from the design tokens. The app shell still sets its own colours and font. */
+  body { background-color: var(--cg-canvas); color: var(--cg-text); font-family: var(--cg-font-sans); }
   ::selection { background: rgba(124, 58, 237, 0.3); color: white; }
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: #0a0a0f; }

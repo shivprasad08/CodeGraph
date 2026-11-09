@@ -18,6 +18,22 @@ const SIZES = {
 };
 
 /**
+ * Classes for a link that should look like a Button (e.g. a router <Link>).
+ * Use a real <button> for actions and this for navigation.
+ */
+export function buttonClasses({ variant = 'secondary', size = 'md', className } = {}) {
+  return cn(
+    'relative inline-flex select-none items-center justify-center whitespace-nowrap',
+    'rounded-cg-control font-cg-sans font-medium',
+    'transition-colors duration-cg-fast ease-cg [@media(pointer:coarse)]:min-h-11',
+    focusRing,
+    VARIANTS[variant],
+    SIZES[size],
+    className,
+  );
+}
+
+/**
  * Button. The label should be verb-first ("Analyze repo"); that is the caller's job.
  * @param {object} props
  * @param {'primary'|'secondary'|'ghost'|'danger'} [props.variant='secondary']
@@ -48,17 +64,15 @@ const Button = forwardRef(function Button(
       type={type}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cn(
-        'relative inline-flex select-none items-center justify-center whitespace-nowrap',
-        'rounded-cg-control font-cg-sans font-medium',
-        'transition-colors duration-cg-fast ease-cg [@media(pointer:coarse)]:min-h-11',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-        loading && 'disabled:cursor-wait disabled:opacity-100',
-        focusRing,
-        VARIANTS[variant],
-        SIZES[size],
-        className,
-      )}
+      className={buttonClasses({
+        variant,
+        size,
+        className: cn(
+          'disabled:cursor-not-allowed disabled:opacity-50',
+          loading && 'disabled:cursor-wait disabled:opacity-100',
+          className,
+        ),
+      })}
       {...props}
     >
       {/* Content stays in the layout while loading so the width does not change */}

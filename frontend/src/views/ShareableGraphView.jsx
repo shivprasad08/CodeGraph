@@ -1,108 +1,115 @@
-import { useState, useEffect, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { fetchRepo, fetchGraph, subscribeToJob, fetchAnalysis } from '../api';
-import ProgressBar from '../components/ProgressBar';
-import GraphCanvas from '../components/GraphCanvas';
-import NodePanel from '../components/NodePanel';
+// Page pattern: split pane — file tree | graph canvas (+ status bar) | inspector.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
+import { TriangleAlert, X } from 'lucide-react';
+import { analyzeRepo, fetchAnalysis, fetchGraph, fetchRepo, subscribeToJob } from '../api';
 import { buildDirectoryColorMap } from '../utils/directoryColors';
-
+import { isPlainKey, isTypingTarget } from '../lib/hotkeys';
+import { readStorage, safePanelStorage, writeStorage } from '../lib/storage';
+import { cn } from '../lib/cn';
+import { Button, Dialog, DialogContent, IconButton } from '../ui';
+import GraphCanvas from '../components/GraphCanvas';
 import FileTree from '../components/FileTree';
 import CodeInspector from '../components/CodeInspector';
-import HealthPanel from '../components/HealthPanel';
+import ProgressBar from '../components/ProgressBar';
+import AppTopBar, { TopBarFrame } from '../components/app/AppTopBar';
+import Inspector, { INSPECTOR_TABS } from '../components/app/Inspector';
+import StatusBar from '../components/app/StatusBar';
+import GraphLegend from '../components/app/GraphLegend';
+import CommandPalette from '../components/app/CommandPalette';
 
-export default function ShareableGraphView() {
-  const { owner, repo, jobId } = useParams();
-  const navigate = useNavigate();
-  
-  const [graphData, setGraphData] = useState(null);
-  const [analysis, setAnalysis] = useState(null);
-  const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [jobStatus, setJobStatus] = useState(null); // 'analyzing', 'error'
-  const [error, setError] = useState(null);
-  const [selectedNode, setSelectedNode] = useState(null);
-  
-  // Compute directory colors globally for graph and file tree
-  const dirColorMap = useMemo(
-    () => (graphData ? buildDirectoryColorMap(graphData.nodes) : {}),
-    [graphData]
+const MOBILE_QUERY = '(max-width: 767px)';
+const LEFT_PX = { default: 264, min: 200, max: 420 };
+const RIGHT_PX = { default: 380, min: 300, max: 560 };
+const SMALL_SCREEN_NOTE_KEY = 'codegraph:small-screen-note-dismissed';
+const EMPTY_SET = new Set();
+
+function useIsMobile() {
+  const get = () => typeof window !== 'undefined' && !!window.matchMedia?.(MOBILE_QUERY).matches;
+  const [mobile, setMobile] = useState(get);
+  useEffect(() => {
+    const mq = window.matchMedia?.(MOBILE_QUERY);
+    if (!mq) return undefined;
+    const onChange = () => setMobile(mq.matches);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, []);
+  return mobile;
+}
+
+function ResizeHandle({ label }) {
+  return (
+    <PanelResizeHandle
+      aria-label={label}
+      className={cn(
+        'relative w-px shrink-0 bg-cg-border outline-none transition-colors duration-cg-fast ease-cg',
+        // Wider hit area than the visible hairline
+        "before:absolute before:inset-y-0 before:-left-1.5 before:w-3 before:content-['']",
+        'data-[resize-handle-state=hover]:bg-cg-border-strong data-[resize-handle-state=drag]:bg-cg-text',
+        'focus-visible:bg-cg-text',
+      )}
+    />
   );
-  
-  // New layout and file tree states
-  const [selectedFilePath, setSelectedFilePath] = useState(null);
-  const [highlightedNodeIds, setHighlightedNodeIds] = useState(new Set());
-  const [zoomToNodes, setZoomToNodes] = useState(null);
-  const [sidebarVisible, setSidebarVisible] = useState(window.innerWidth >= 768);
-  const [chatVisible, setChatVisible] = useState(window.innerWidth >= 768);
+}
 
-  // Inspector state
-  const [inspectorFilePath, setInspectorFilePath] = useState(null);
-  const [inspectorVisible, setInspectorVisible] = useState(false);
+/** Centered message in the canvas column (errors). */
+function CenterMessage({ icon, title, body, actions }) {
+  return (
+    <div className="flex flex-1 items-center justify-center p-6">
+      <div className="max-w-sm text-center">
+        {icon}
+        <h1 className="mt-3 text-cg-lg font-semibold text-cg-text">{title}</h1>
+        {body && <p className="mt-1 text-cg-sm text-cg-secondary">{body}</p>}
+        {actions && <div className="mt-5 flex flex-wrap justify-center gap-2">{actions}</div>}
+      </div>
+    </div>
+  );
+}
 
-  const [chatHighlightedNodeIds, setChatHighlightedNodeIds] = useState(new Set());
+/**
+ * Graph app view. With `staticData` (a saved /graph response) it renders that graph
+ * without calling the backend; features that need the server show a short note.
+ */
+export default function ShareableGraphView({ staticData = null } = {}) {
+  const params = useParams();
+  const offline = Boolean(staticData);
+  const [owner, repo] = offline ? (staticData.repo || '/').split('/') : [params.owner, params.repo];
+  const jobId = offline ? undefined : params.jobId;
+  const navigate = useNavigate();
+  const isMobile = useIsMobile();
 
-  // Simulation state
-  const [simulationMode, setSimulationMode] = useState(false);
-  const [blastRadius, setBlastRadius] = useState(null);
-  const [simulationSourceFile, setSimulationSourceFile] = useState(null);
-
-  // Progress state for loading UI
+  // ---- Data -----------------------------------------------------------------
+  const [graphData, setGraphData] = useState(staticData);
+  const [analysis, setAnalysis] = useState(staticData?.analysis ?? null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [jobStatus, setJobStatus] = useState(offline ? 'done' : null);
+  const [error, setError] = useState(null);
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState('queued');
   const [message, setMessage] = useState('Queued');
   const [startedAt, setStartedAt] = useState(null);
-  
-  // Share button state
-  const [copied, setCopied] = useState(false);
-  const [isCached, setIsCached] = useState(false);
 
-  // Global Keyboard Shortcuts
   useEffect(() => {
-    const handleGlobalKeyDown = (e) => {
-      if (e.key === 'Escape') {
-        // Clear in priority order
-        if (simulationMode) {
-          setSimulationMode(false);
-          setBlastRadius(null);
-        } else if (document.activeElement?.id === 'file-tree-search') {
-          document.activeElement.blur();
-        } else if (inspectorVisible) {
-          setInspectorVisible(false);
-        } else if (selectedFilePath) {
-          setSelectedFilePath(null);
-          setHighlightedNodeIds(new Set());
-          setZoomToNodes(null);
-        } else if (selectedNode) {
-          setSelectedNode(null);
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
-        e.preventDefault();
-        setSidebarVisible(v => !v);
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'j') {
-        e.preventDefault();
-        setChatVisible(v => !v);
-      } else if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
-        e.preventDefault();
-        setInspectorVisible(false);
-      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'e') {
-        e.preventDefault();
-        setInspectorVisible(v => !v);
+    document.title = `CodeGraph — ${owner}/${repo}`;
+    // Static demo: the graph is already loaded and there is no backend to call
+    if (offline) return undefined;
+
+    const loadAnalysis = (graph, id) => {
+      if (graph.analysis) setAnalysis(graph.analysis);
+      else if (id) {
+        setAnalysisLoading(true);
+        fetchAnalysis(id)
+          .then(setAnalysis)
+          .catch(() => {})
+          .finally(() => setAnalysisLoading(false));
       }
     };
-    
-    document.addEventListener('keydown', handleGlobalKeyDown);
-    return () => document.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [selectedFilePath, selectedNode, inspectorVisible, simulationMode]);
 
-  useEffect(() => {
-    // Set basic title immediately
-    document.title = `CodeGraph — ${owner}/${repo}`;
-    
     if (jobId) {
-      // Flow B: we have a jobId, subscribe to SSE
       setJobStatus('analyzing');
       setStartedAt(Date.now());
-      
-      const unsubscribe = subscribeToJob(
+      return subscribeToJob(
         jobId,
         (data) => {
           setProgress(data.progress);
@@ -114,181 +121,369 @@ export default function ShareableGraphView() {
           setJobStatus('error');
         },
         async () => {
-          // done
           try {
             const finalGraph = await fetchGraph(jobId);
             setGraphData(finalGraph);
             setJobStatus('done');
-            
-            if (finalGraph.analysis) {
-              setAnalysis(finalGraph.analysis);
-            } else {
-              setAnalysisLoading(true);
-              fetchAnalysis(jobId).then(data => {
-                setAnalysis(data);
-                setAnalysisLoading(false);
-              }).catch(() => setAnalysisLoading(false));
-            }
+            loadAnalysis(finalGraph, jobId);
           } catch (err) {
-            setError(err.message || "Failed to load graph after completion");
+            setError(err.message || 'The graph could not be loaded after the analysis finished');
             setJobStatus('error');
           }
-        }
+        },
       );
-      return unsubscribe;
-    } else {
-      // Flow A: Check if cached or trigger analysis
-      const loadRepo = async () => {
-        try {
-          const res = await fetchRepo(owner, repo);
-          if (res.status === 'cached') {
-            setIsCached(true);
-            setGraphData(res.graph);
-            setJobStatus('done');
-            
-            if (res.graph.analysis) {
-              setAnalysis(res.graph.analysis);
-            } else if (jobId) {
-              setAnalysisLoading(true);
-              fetchAnalysis(jobId).then(data => {
-                setAnalysis(data);
-                setAnalysisLoading(false);
-              }).catch(() => setAnalysisLoading(false));
-            }
-          } else if (res.status === 'analyzing') {
-            // Redirect to the job URL to watch progress
-            navigate(`/graph/${owner}/${repo}/jobs/${res.job_id}`, { replace: true });
-          }
-        } catch (err) {
-          setError(err.message || `Could not analyze ${owner}/${repo}`);
-          setJobStatus('error');
-        }
-      };
-      loadRepo();
     }
-  }, [owner, repo, jobId, navigate]);
 
-  const handleShare = () => {
-    const shareUrl = `${window.location.origin}/graph/${owner}/${repo}`;
-    navigator.clipboard.writeText(shareUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    (async () => {
+      try {
+        const res = await fetchRepo(owner, repo);
+        if (res.status === 'cached') {
+          setGraphData(res.graph);
+          setJobStatus('done');
+          loadAnalysis(res.graph, null);
+        } else if (res.status === 'analyzing') {
+          navigate(`/graph/${owner}/${repo}/jobs/${res.job_id}`, { replace: true });
+        }
+      } catch (err) {
+        setError(err.message || `Could not analyze ${owner}/${repo}`);
+        setJobStatus('error');
+      }
+    })();
+    return undefined;
+  }, [owner, repo, jobId, navigate, offline]);
+
+  const dirColorMap = useMemo(() => (graphData ? buildDirectoryColorMap(graphData.nodes) : {}), [graphData]);
+
+  // ---- Selection & panels ----------------------------------------------------
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [selectedFilePath, setSelectedFilePath] = useState(null);
+  const [highlightedNodeIds, setHighlightedNodeIds] = useState(EMPTY_SET);
+  const [chatHighlightedNodeIds, setChatHighlightedNodeIds] = useState(EMPTY_SET);
+  const [zoomToNodes, setZoomToNodes] = useState(null);
+  const [simulationMode, setSimulationMode] = useState(false);
+  const [blastRadius, setBlastRadius] = useState(null);
+  const [simulationSource, setSimulationSource] = useState(null);
+  const [tab, setTab] = useState('details');
+  const [code, setCode] = useState(null); // { file, line }
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [recentIds, setRecentIds] = useState([]);
+  const [hullsVisible, setHullsVisible] = useState(true);
+  const [hiddenDirs, setHiddenDirs] = useState(EMPTY_SET);
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [filesSheet, setFilesSheet] = useState(false);
+  const [inspectorSheet, setInspectorSheet] = useState(false);
+  const [showSmallNote, setShowSmallNote] = useState(() => !readStorage(SMALL_SCREEN_NOTE_KEY, false));
+  const [notice, setNotice] = useState(null);
+  const [rerunning, setRerunning] = useState(false);
+
+  const canvasRef = useRef(null);
+  const leftPanelRef = useRef(null);
+  const rightPanelRef = useRef(null);
+  const zoomListener = useRef(null);
+
+  // Panel sizes are percentages in react-resizable-panels v3; derive them from pixels once
+  const [sizes] = useState(() => {
+    const w = Math.max(window.innerWidth, 768);
+    const pct = (px) => Math.min(60, (px / w) * 100);
+    return {
+      left: { defaultSize: pct(LEFT_PX.default), minSize: pct(LEFT_PX.min), maxSize: pct(LEFT_PX.max) },
+      right: { defaultSize: pct(RIGHT_PX.default), minSize: pct(RIGHT_PX.min), maxSize: pct(RIGHT_PX.max) },
+    };
+  });
+
+  // The panel API throws until the group has registered its sizes, so every call is guarded
+  const panelCall = (ref, method) => {
+    try {
+      return ref.current?.[method]?.();
+    } catch {
+      return undefined;
+    }
   };
 
-  const effectiveHighlights = new Set([...highlightedNodeIds, ...chatHighlightedNodeIds]);
+  // A saved layout may start with a panel collapsed; read it once the group has laid out
+  useEffect(() => {
+    if (isMobile) return undefined;
+    const id = requestAnimationFrame(() => {
+      const left = panelCall(leftPanelRef, 'isCollapsed');
+      const right = panelCall(rightPanelRef, 'isCollapsed');
+      if (left !== undefined) setLeftOpen(!left);
+      if (right !== undefined) setRightOpen(!right);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [isMobile, graphData]);
 
-  const handleChatHighlight = (nodeIds) => {
-    setChatHighlightedNodeIds(new Set(nodeIds));
-    setZoomToNodes([...nodeIds]);
-    setTimeout(() => {
-      setChatHighlightedNodeIds(new Set());
-    }, 5000);
+  const showInspector = useCallback(() => {
+    if (isMobile) setInspectorSheet(true);
+    else panelCall(rightPanelRef, 'expand');
+  }, [isMobile]);
+
+  const toggleLeft = useCallback(() => {
+    if (isMobile) return setFilesSheet((v) => !v);
+    return panelCall(leftPanelRef, panelCall(leftPanelRef, 'isCollapsed') ? 'expand' : 'collapse');
+  }, [isMobile]);
+
+  const toggleRight = useCallback(() => {
+    if (isMobile) return setInspectorSheet((v) => !v);
+    return panelCall(rightPanelRef, panelCall(rightPanelRef, 'isCollapsed') ? 'expand' : 'collapse');
+  }, [isMobile]);
+
+  const remember = (id) => setRecentIds((prev) => [id, ...prev.filter((x) => x !== id)].slice(0, 8));
+
+  const selectNode = useCallback(
+    (node, { openDetails = true } = {}) => {
+      if (!node) {
+        setSelectedNode(null);
+        setHighlightedNodeIds(EMPTY_SET);
+        setSelectedFilePath(null);
+        return;
+      }
+      setSelectedNode(node);
+      setHighlightedNodeIds(new Set([node.id]));
+      remember(node.id);
+      setCode((c) => (c && node.type !== 'file' && node.file && c.file !== node.file ? { file: node.file } : c));
+      if (openDetails) {
+        setTab('details');
+        if (!isMobile) panelCall(rightPanelRef, 'expand');
+      }
+    },
+    [isMobile],
+  );
+
+  const selectFromPalette = (node) => {
+    selectNode(node);
+    setZoomToNodes([node.id]);
+    if (isMobile) setInspectorSheet(true);
   };
 
   const handleFileSelect = (filePath) => {
-    if (selectedFilePath === filePath) {
-      if (!inspectorVisible) {
-        setInspectorVisible(true);
-        setInspectorFilePath(filePath);
-      } else {
-        setSelectedFilePath(null);
-        setHighlightedNodeIds(new Set());
-        setZoomToNodes(null);
-        setInspectorVisible(false);
-      }
-      if (window.innerWidth < 768) setSidebarVisible(false); // Close on select for mobile
-      return;
-    }
-    
-    setSelectedFilePath(filePath);
-    setInspectorFilePath(filePath);
-    setInspectorVisible(true);
-    if (window.innerWidth < 768) setSidebarVisible(false); // Close on select for mobile
-    
     if (!graphData) return;
-    const fileNodeIds = new Set(
-      graphData.nodes
-        .filter(n => n.file === filePath || n.id === filePath)
-        .map(n => n.id)
-    );
-    setHighlightedNodeIds(fileNodeIds);
-    setZoomToNodes([...fileNodeIds]);
-  };
-
-  const handleSimulateFile = (filePath) => {
-    setSimulationSourceFile(filePath);
-  };
-
-  const handleNodeNavigate = (node) => {
-    if (!node) {
-      setSelectedNode(null);
-      setHighlightedNodeIds(new Set());
-      setSelectedFilePath(null);
+    if (selectedFilePath === filePath) {
+      // Second click toggles the code view, as before
+      setCode((c) => (c?.file === filePath ? null : { file: filePath }));
       return;
     }
-    setSelectedNode(node);
-    setHighlightedNodeIds(new Set([node.id]));
-    
-    if (node.type === "function" || node.type === "class" || node.type === "file") {
-      if (inspectorVisible && inspectorFilePath !== node.file) {
-        setInspectorFilePath(node.file);
-      }
+    setSelectedFilePath(filePath);
+    setCode({ file: filePath });
+    const ids = new Set(graphData.nodes.filter((n) => n.file === filePath || n.id === filePath).map((n) => n.id));
+    setHighlightedNodeIds(ids);
+    setZoomToNodes([...ids]);
+    const fileNode = graphData.nodes.find((n) => n.id === filePath);
+    if (fileNode) {
+      setSelectedNode(fileNode);
+      remember(fileNode.id);
+    }
+    if (isMobile) setFilesSheet(false);
+  };
+
+  const viewSource = (node, line) => {
+    const file = node.type === 'file' ? node.id : node.file;
+    if (!file) return;
+    setSelectedFilePath(file);
+    setCode({ file, line });
+    if (isMobile) setInspectorSheet(false);
+  };
+
+  const simulate = (nodeOrId) => {
+    setSimulationSource(typeof nodeOrId === 'string' ? nodeOrId : nodeOrId.id);
+    setTab('impact');
+    showInspector();
+    if (isMobile) setFilesSheet(false);
+  };
+
+  const handleChatHighlight = useCallback((ids) => {
+    setChatHighlightedNodeIds(new Set(ids));
+    if (ids.length) setZoomToNodes([...ids]);
+  }, []);
+  useEffect(() => {
+    if (!chatHighlightedNodeIds.size) return undefined;
+    const t = setTimeout(() => setChatHighlightedNodeIds(EMPTY_SET), 5000);
+    return () => clearTimeout(t);
+  }, [chatHighlightedNodeIds]);
+
+  const effectiveHighlights = useMemo(
+    () => (chatHighlightedNodeIds.size ? new Set([...highlightedNodeIds, ...chatHighlightedNodeIds]) : highlightedNodeIds),
+    [highlightedNodeIds, chatHighlightedNodeIds],
+  );
+
+  const exitSimulation = () => {
+    setSimulationMode(false);
+    setBlastRadius(null);
+  };
+
+  const rerun = async () => {
+    if (offline || rerunning) return;
+    setRerunning(true);
+    setNotice(null);
+    try {
+      const res = await analyzeRepo(`https://github.com/${owner}/${repo}`);
+      navigate(`/graph/${owner}/${repo}/jobs/${res.job_id}`);
+    } catch (err) {
+      setNotice(`Couldn't start a new analysis: ${(err.message || 'no response').replace(/\.\s*$/, '')}. Try again in a minute.`);
+    } finally {
+      setRerunning(false);
     }
   };
+
+  // ---- Keyboard ---------------------------------------------------------------
+  const stateRef = useRef({});
+  stateRef.current = { simulationMode, code, selectedNode, selectedFilePath, paletteOpen, filesSheet, inspectorSheet };
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const s = stateRef.current;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (e.defaultPrevented || isTypingTarget(e.target) || !isPlainKey(e)) return;
+      // Overlays (palette, sheets, menus) handle their own keys
+      if (s.paletteOpen || s.filesSheet || s.inspectorSheet || document.querySelector('[role="dialog"], [role="menu"]')) return;
+
+      const tabIndex = ['1', '2', '3', '4'].indexOf(e.key);
+      if (tabIndex >= 0) {
+        e.preventDefault();
+        setTab(INSPECTOR_TABS[tabIndex].value);
+        showInspector();
+        return;
+      }
+      switch (e.key) {
+        case '/':
+          e.preventDefault();
+          setPaletteOpen(true);
+          break;
+        case '[':
+          e.preventDefault();
+          toggleLeft();
+          break;
+        case ']':
+          e.preventDefault();
+          toggleRight();
+          break;
+        case '-':
+        case '_':
+          canvasRef.current?.zoomOut();
+          break;
+        case '+':
+        case '=':
+          canvasRef.current?.zoomIn();
+          break;
+        case 'f':
+        case 'F':
+          canvasRef.current?.zoomToFit();
+          break;
+        case 'Escape':
+          if (s.simulationMode) exitSimulation();
+          else if (s.code) setCode(null);
+          else if (s.selectedNode || s.selectedFilePath) {
+            setSelectedNode(null);
+            setSelectedFilePath(null);
+            setHighlightedNodeIds(EMPTY_SET);
+            setZoomToNodes(null);
+          }
+          break;
+        default:
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [toggleLeft, toggleRight, showInspector]);
+
+  // ---- Render: error / loading -------------------------------------------------
+  const repoCrumb = (
+    <span className="truncate font-cg-mono text-cg-sm text-cg-text">
+      {owner}/{repo}
+    </span>
+  );
 
   if (error) {
     return (
-      <div className="h-screen bg-[#0a0a0f] text-white flex flex-col items-center justify-center p-4 font-sans">
-        <div className="bg-[#111118] border border-[#1e1e2e] rounded-xl p-8 max-w-md w-full text-center shadow-2xl">
-          <div className="text-4xl mb-4">⚠️</div>
-          <h2 className="text-xl font-semibold mb-2">Could not analyze {owner}/{repo}</h2>
-          <p className="text-[#94a3b8] mb-8">{error}</p>
-          <button 
-            onClick={() => navigate('/')}
-            className="bg-[#1e1e2e] hover:bg-[#2a2a3b] text-white px-6 py-2.5 rounded-lg transition"
-          >
-            Back to home
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (jobStatus === 'analyzing' || (!graphData && jobStatus !== 'error')) {
-    return (
-      <div className="h-screen bg-[#0a0a0f] flex items-center justify-center p-4">
-        <ProgressBar 
-          progress={progress} 
-          stage={stage} 
-          message={message} 
-          startedAt={startedAt} 
+      <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
+        <TopBarFrame repoLabel={repoCrumb} />
+        <CenterMessage
+          icon={<TriangleAlert size={24} strokeWidth={1.5} aria-hidden="true" className="mx-auto text-cg-tertiary" />}
+          title={`Couldn't analyze ${owner}/${repo}`}
+          body={`${String(error).replace(/\.\s*$/, '')}. Check that the repository is public and has Python files, then try again.`}
+          actions={
+            <>
+              <Button variant="primary" onClick={() => window.location.reload()}>
+                Try again
+              </Button>
+              <Button onClick={() => navigate('/')}>Back to home</Button>
+            </>
+          }
         />
       </div>
     );
   }
 
-  // Loaded graph view
-  return (
-    <div className="h-screen w-full flex overflow-hidden bg-[#0a0a0f] font-sans">
-      
-      {/* Left Sidebar - File Tree */}
-      <FileTree
-        graph={graphData}
-        onFileSelect={handleFileSelect}
-        onNodeSelect={handleNodeNavigate}
-        onSimulateFile={handleSimulateFile}
-        selectedFilePath={selectedFilePath}
-        selectedNodeId={selectedNode?.id ?? null}
-        hidden={!sidebarVisible}
-        onClose={() => setSidebarVisible(false)}
-        dirColorMap={dirColorMap}
-      />
+  if (jobStatus === 'analyzing' || !graphData) {
+    return (
+      <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
+        <TopBarFrame repoLabel={repoCrumb} />
+        <div className="flex flex-1 items-center justify-center p-4">
+          {jobStatus === 'analyzing' ? (
+            <ProgressBar progress={progress} stage={stage} message={message} startedAt={startedAt} repo={`${owner}/${repo}`} />
+          ) : (
+            <p role="status" className="text-cg-sm text-cg-tertiary">
+              Loading graph…
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
-      {/* Center - Graph Canvas */}
-      <div className="flex-1 relative overflow-hidden flex flex-col min-w-[300px]">
-        <GraphCanvas 
-          graph={graphData} 
-          onNodeClick={handleNodeNavigate} 
+  // ---- Render: app ------------------------------------------------------------
+  const fileTree = (
+    <FileTree
+      graph={graphData}
+      onFileSelect={handleFileSelect}
+      onNodeSelect={(node) => {
+        selectNode(node);
+        if (isMobile) setFilesSheet(false);
+      }}
+      onSimulateFile={simulate}
+      selectedFilePath={selectedFilePath}
+      selectedNodeId={selectedNode?.id ?? null}
+      dirColorMap={dirColorMap}
+    />
+  );
+
+  const inspector = (
+    <Inspector
+      tab={tab}
+      onTabChange={setTab}
+      graph={graphData}
+      analysis={analysis}
+      analysisLoading={analysisLoading}
+      selectedNode={selectedNode}
+      offline={offline}
+      simulationSource={simulationSource}
+      onSelectNode={(node) => {
+        selectNode(node);
+        setZoomToNodes([node.id]);
+      }}
+      onViewSource={viewSource}
+      onSimulate={simulate}
+      onOpenSearch={() => setPaletteOpen(true)}
+      onNodeHighlight={handleChatHighlight}
+      onBlastRadiusChange={setBlastRadius}
+      onSimulationModeChange={setSimulationMode}
+      onAnalyzeOwn={() => navigate('/')}
+    />
+  );
+
+  const canvasColumn = (
+    <div className="relative flex h-full min-w-0 flex-col overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-cg-canvas">
+        <GraphCanvas
+          ref={canvasRef}
+          graph={graphData}
+          onNodeClick={(node) => {
+            selectNode(node);
+            if (isMobile && node) setInspectorSheet(true);
+          }}
           selectedNodeId={selectedNode?.id ?? null}
           highlightedNodeIds={effectiveHighlights}
           chatHighlightedNodeIds={chatHighlightedNodeIds}
@@ -296,122 +491,145 @@ export default function ShareableGraphView() {
           dirColorMap={dirColorMap}
           blastRadius={blastRadius}
           simulationMode={simulationMode}
-          onExitSimulation={() => {
-            setSimulationMode(false);
-            setBlastRadius(null);
-          }}
+          onExitSimulation={exitSimulation}
+          hullsVisible={hullsVisible}
+          hiddenDirs={hiddenDirs}
+          onZoom={(k) => zoomListener.current?.(k)}
         />
-        
-        {/* Top Overlay */}
-        {simulationMode && (
-          <div className="absolute top-12 left-1/2 -translate-x-1/2 z-30 bg-red-500/20 border border-red-500/40 rounded-full px-4 py-1.5 flex items-center gap-2 pointer-events-none">
-            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
-            <div className="text-red-400 font-mono text-xs">SIMULATION ACTIVE — graph shows blast radius</div>
+
+        {(notice || (isMobile && showSmallNote)) && (
+          <div className="absolute inset-x-3 top-3 z-30 flex flex-col gap-2">
+            {notice && (
+              <p role="status" className="flex items-start gap-2 rounded-cg-control border border-cg-border bg-cg-overlay py-2 pl-3 pr-1 text-cg-sm text-cg-text shadow-cg-edge">
+                <span className="flex-1">{notice}</span>
+                <IconButton label="Dismiss" size="sm" tooltip={false} onClick={() => setNotice(null)}>
+                  <X size={16} strokeWidth={1.5} aria-hidden="true" />
+                </IconButton>
+              </p>
+            )}
+            {isMobile && showSmallNote && (
+              <p className="flex items-center gap-2 rounded-cg-control border border-cg-border bg-cg-overlay py-1 pl-3 pr-1 text-cg-sm text-cg-secondary shadow-cg-edge">
+                <span className="flex-1">CodeGraph works best on a larger screen.</span>
+                <IconButton
+                  label="Dismiss"
+                  size="sm"
+                  tooltip={false}
+                  onClick={() => {
+                    setShowSmallNote(false);
+                    writeStorage(SMALL_SCREEN_NOTE_KEY, true);
+                  }}
+                >
+                  <X size={16} strokeWidth={1.5} aria-hidden="true" />
+                </IconButton>
+              </p>
+            )}
           </div>
         )}
-        <div className="absolute top-4 left-4 right-4 flex justify-between items-start pointer-events-none z-10">
-          
-          {/* Left Stats Pill - Hidden on very small screens */}
-          <div className="hidden md:block bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-xl p-4 min-w-[200px] pointer-events-auto shadow-lg">
-            <div className="text-xs text-[#94a3b8] mb-1 font-mono uppercase tracking-wider flex items-center gap-2">
-              Repository
-              {isCached && <span className="bg-[#7c3aed]/20 text-[#7c3aed] px-1.5 py-0.5 rounded text-[10px]">CACHED</span>}
-            </div>
-            <a 
-              href={`https://github.com/${owner}/${repo}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-white font-medium hover:text-[#7c3aed] transition flex items-center gap-1 group"
-            >
-              {owner}/{repo}
-              <span className="text-[#94a3b8] group-hover:text-[#7c3aed] text-xs transition">↗</span>
-            </a>
-            <div className="mt-3 flex gap-4 text-sm">
-              <div>
-                <div className="text-[#94a3b8] text-xs">Nodes</div>
-                <div className="text-white font-mono">{graphData.nodes.length}</div>
-              </div>
-              <div>
-                <div className="text-[#94a3b8] text-xs">Edges</div>
-                <div className="text-white font-mono">{graphData.edges.length}</div>
-              </div>
-            </div>
-          </div>
-          
-          {/* Mobile specific top pill */}
-          <div className="md:hidden bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-3 py-1.5 pointer-events-auto shadow-lg flex items-center gap-2">
-            <span className="text-white text-xs font-mono font-medium truncate max-w-[120px]">{repo}</span>
-            {isCached && <span className="bg-[#7c3aed]/20 text-[#7c3aed] px-1 py-0.5 rounded text-[9px]">CACHED</span>}
-          </div>
 
-          {/* Right Action Buttons */}
-          <div className="flex gap-2 pointer-events-auto items-center">
-            <button
-              onClick={handleShare}
-              className="bg-[#111118]/80 backdrop-blur border border-[#7c3aed]/40 rounded-full px-3 md:px-4 py-1.5 text-[10px] md:text-xs font-mono text-[#7c3aed] hover:bg-[#7c3aed]/10 transition flex items-center gap-1.5 shadow-lg"
-            >
-              {copied ? 'Copied!' : 'Share'}
-            </button>
-            <button
-              onClick={() => navigate('/')}
-              className="bg-[#111118]/80 backdrop-blur border border-[#1e1e2e]/40 rounded-full px-3 md:px-4 py-1.5 text-[10px] md:text-xs font-mono text-white hover:bg-[#1e1e2e] transition shadow-lg"
-            >
-              New
-            </button>
-          </div>
-        </div>
-
-        <NodePanel 
-          node={selectedNode} 
-          graph={graphData} 
-          onClose={() => setSelectedNode(null)} 
-        />
-
-        {inspectorVisible && (
-          <CodeInspector
-            filePath={inspectorFilePath}
+        {!simulationMode && (
+          <GraphLegend
             graph={graphData}
-            selectedNodeId={selectedNode?.id ?? null}
-            onClose={() => setInspectorVisible(false)}
-            onNodeClick={handleNodeNavigate}
-            onFileSelect={handleFileSelect}
-            repo={owner + '/' + repo}
-            commitSha={graphData?.commit_sha}
+            dirColorMap={dirColorMap}
+            hullsVisible={hullsVisible}
+            onHullsVisibleChange={setHullsVisible}
+            hiddenDirs={hiddenDirs}
+            onHiddenDirsChange={setHiddenDirs}
           />
         )}
 
-        {/* Mobile Floating Action Buttons for Drawers */}
-        <div className="md:hidden absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 z-30 pointer-events-auto bg-[#111118]/90 backdrop-blur p-1.5 rounded-full border border-[#1e1e2e]/50 shadow-2xl">
-          <button 
-            onClick={() => setSidebarVisible(true)}
-            className="px-4 py-2 rounded-full text-xs font-mono font-medium text-white hover:bg-[#1e1e2e] transition-colors"
-          >
-            ≡ Files
-          </button>
-          <div className="w-px h-6 bg-[#1e1e2e]/50" />
-          <button 
-            onClick={() => setChatVisible(true)}
-            className="px-4 py-2 rounded-full text-xs font-mono font-medium text-white hover:bg-[#1e1e2e] transition-colors"
-          >
-            ✦ AI Chat
-          </button>
-        </div>
+        {code && (
+          <CodeInspector
+            filePath={code.file}
+            focusLine={code.line}
+            graph={graphData}
+            selectedNodeId={selectedNode?.id ?? null}
+            onClose={() => setCode(null)}
+            onNodeClick={(node) => selectNode(node)}
+            repo={`${owner}/${repo}`}
+            commitSha={graphData?.commit_sha}
+            offline={offline}
+          />
+        )}
       </div>
-      
-      {/* Right Sidebar - Health & Chat */}
-      <HealthPanel
-        analysis={analysis}
+      <StatusBar
         graph={graphData}
-        jobId={jobId}
-        onNodeClick={handleNodeNavigate}
-        onNodeHighlight={(ids) => setChatHighlightedNodeIds(new Set(ids))}
-        isLoading={analysisLoading}
-        onBlastRadiusChange={setBlastRadius}
-        onSimulationModeChange={setSimulationMode}
-        simulationSourceFile={simulationSourceFile}
-        hidden={!chatVisible}
-        onClose={() => setChatVisible(false)}
+        zoomListener={zoomListener}
+        onZoomIn={() => canvasRef.current?.zoomIn()}
+        onZoomOut={() => canvasRef.current?.zoomOut()}
+        onFit={() => canvasRef.current?.zoomToFit()}
       />
+    </div>
+  );
+
+  return (
+    <div className="relative flex h-dvh flex-col overflow-hidden bg-cg-canvas font-cg-sans text-cg-text">
+      <AppTopBar
+        owner={owner}
+        repo={repo}
+        commitSha={graphData.commit_sha}
+        offline={offline}
+        isMobile={isMobile}
+        leftOpen={isMobile ? filesSheet : leftOpen}
+        rightOpen={isMobile ? inspectorSheet : rightOpen}
+        onToggleLeft={toggleLeft}
+        onToggleRight={toggleRight}
+        onOpenSearch={() => setPaletteOpen(true)}
+        onRerun={rerun}
+        rerunning={rerunning}
+        onNew={() => navigate('/')}
+      />
+
+      {isMobile ? (
+        <>
+          <div className="min-h-0 flex-1">{canvasColumn}</div>
+          <Dialog open={filesSheet} onOpenChange={setFilesSheet}>
+            <DialogContent side="left" bare title="Files">
+              {fileTree}
+            </DialogContent>
+          </Dialog>
+          <Dialog open={inspectorSheet} onOpenChange={setInspectorSheet}>
+            <DialogContent side="right" bare title="Inspector">
+              {inspector}
+            </DialogContent>
+          </Dialog>
+        </>
+      ) : (
+        <PanelGroup direction="horizontal" autoSaveId="codegraph:app-layout" storage={safePanelStorage} className="min-h-0 flex-1">
+          <Panel
+            ref={leftPanelRef}
+            id="files"
+            order={1}
+            collapsible
+            collapsedSize={0}
+            {...sizes.left}
+            onCollapse={() => setLeftOpen(false)}
+            onExpand={() => setLeftOpen(true)}
+            className="relative"
+          >
+            {fileTree}
+          </Panel>
+          <ResizeHandle label="Resize file tree" />
+          <Panel id="canvas" order={2} minSize={25} className="relative">
+            {canvasColumn}
+          </Panel>
+          <ResizeHandle label="Resize inspector" />
+          <Panel
+            ref={rightPanelRef}
+            id="inspector"
+            order={3}
+            collapsible
+            collapsedSize={0}
+            {...sizes.right}
+            onCollapse={() => setRightOpen(false)}
+            onExpand={() => setRightOpen(true)}
+            className="relative"
+          >
+            {inspector}
+          </Panel>
+        </PanelGroup>
+      )}
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} graph={graphData} recentIds={recentIds} onSelect={selectFromPalette} />
     </div>
   );
 }

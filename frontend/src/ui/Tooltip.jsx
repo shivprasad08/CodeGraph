@@ -11,7 +11,12 @@ import { cn } from '../lib/cn';
  * @param {number} [props.delayDuration=300]
  * @param {string} [props.className] Extra classes for the content.
  */
+// Touch devices have no hover, and focus-triggered tooltips cover content when a
+// sheet or dialog moves focus; every trigger already has a visible or aria name.
+const isCoarsePointer = () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
+
 export default function Tooltip({ content, children, side = 'top', delayDuration = 300, className }) {
+  if (isCoarsePointer()) return children;
   return (
     <TooltipPrimitive.Provider delayDuration={delayDuration}>
       <TooltipPrimitive.Root>

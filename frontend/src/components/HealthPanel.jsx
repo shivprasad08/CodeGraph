@@ -1,451 +1,269 @@
-import { useState, useMemo, useEffect } from 'react';
-import ChatSidebar from './ChatSidebar';
-import SimulatorPanel from './SimulatorPanel';
+import { useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import { cn } from '../lib/cn';
+import { Badge, focusRing } from '../ui';
 
-export default function HealthPanel({
-  analysis,
-  graph,
-  jobId,
-  onNodeClick,
-  onNodeHighlight,
-  isLoading,
-  onBlastRadiusChange,
-  onSimulationModeChange,
-  simulationSourceFile,
-  hidden,
-  onClose
-}) {
-  const [activeTab, setActiveTab] = useState('health'); // 'health', 'chat', or 'simulate'
-  const [activeFilter, setActiveFilter] = useState('All'); // 'All', 'high', 'medium', 'low'
+const SEV_RANK = { high: 3, medium: 2, low: 1, info: 0 };
+const SEV_DOT = { high: 'bg-cg-sev-high', medium: 'bg-cg-sev-med', low: 'bg-cg-sev-low', info: 'bg-cg-sev-low' };
+const SEV_TONE = { high: 'high', medium: 'med', low: 'low' };
+const VERDICT = { A: 'Excellent', B: 'Good', C: 'Fair', D: 'Poor', F: 'Needs attention' };
+const GROUPS_OPEN_BY_DEFAULT = 3;
 
-  useEffect(() => {
-    if (simulationSourceFile) {
-      setActiveTab('simulate');
+const sentenceCase = (s = '') => {
+  const t = String(s).replace(/_/g, ' ');
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+};
+
+function verdictLine(grade, counts) {
+  const v = VERDICT[grade] ?? 'Health score';
+  if (counts.high) return `${v} · ${counts.high} high-severity ${counts.high === 1 ? 'issue' : 'issues'} to fix`;
+  if (counts.medium) return `${v} · ${counts.medium} medium ${counts.medium === 1 ? 'issue' : 'issues'} to review`;
+  if (counts.low) return `${v} · ${counts.low} low-priority ${counts.low === 1 ? 'note' : 'notes'}`;
+  return `${v} · no issues found`;
+}
+
+/** 64px ring: track in the border colour, progress in the text colour. No traffic lights. */
+function ScoreRing({ score }) {
+  const r = 28;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg width="64" height="64" viewBox="0 0 64 64" aria-hidden="true" className="shrink-0 -rotate-90">
+      <circle cx="32" cy="32" r={r} fill="none" stroke="var(--cg-border-strong)" strokeWidth="4" />
+      <circle
+        cx="32"
+        cy="32"
+        r={r}
+        fill="none"
+        stroke="var(--cg-text)"
+        strokeWidth="4"
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - Math.max(0, Math.min(100, score)) / 100)}
+      />
+    </svg>
+  );
+}
+
+function HealthSkeleton() {
+  return (
+    <div className="flex flex-col gap-6 p-4" aria-busy="true" aria-label="Loading health analysis">
+      <div className="flex items-center gap-4">
+        <div className="h-16 w-16 rounded-full border-4 border-cg-hover" />
+        <div className="flex flex-1 flex-col gap-2">
+          <div className="h-7 w-24 rounded bg-cg-hover" />
+          <div className="h-4 w-44 rounded bg-cg-hover" />
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="h-9 rounded bg-cg-hover" />
+        ))}
+      </div>
+      {Array.from({ length: 4 }, (_, i) => (
+        <div key={i} className="h-12 rounded bg-cg-hover" />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Health tab.
+ * @param {(node) => void} props.onNodeSelect Select a node (zoom + Details).
+ * @param {(node, line?) => void} props.onViewSource Open the code view at a line.
+ */
+export default function HealthPanel({ analysis, graph, isLoading, onNodeSelect, onViewSource }) {
+  const [filter, setFilter] = useState('all');
+  const [openGroups, setOpenGroups] = useState(null); // null = default set
+
+  const issues = analysis?.issues ?? [];
+  const counts = useMemo(
+    () => ({
+      high: issues.filter((i) => i.severity === 'high').length,
+      medium: issues.filter((i) => i.severity === 'medium').length,
+      low: issues.filter((i) => i.severity === 'low').length,
+    }),
+    [issues],
+  );
+
+  const groups = useMemo(() => {
+    const byFile = new Map();
+    for (const issue of issues) {
+      if (!byFile.has(issue.file)) byFile.set(issue.file, { file: issue.file, severity: issue.severity, issues: [] });
+      const g = byFile.get(issue.file);
+      g.issues.push(issue);
+      if ((SEV_RANK[issue.severity] ?? 0) > (SEV_RANK[g.severity] ?? 0)) g.severity = issue.severity;
     }
-  }, [simulationSourceFile]);
+    return [...byFile.values()]
+      .map((g) => ({ ...g, issues: [...g.issues].sort((a, b) => (SEV_RANK[b.severity] ?? 0) - (SEV_RANK[a.severity] ?? 0) || (a.line ?? 0) - (b.line ?? 0)) }))
+      .sort((a, b) => (SEV_RANK[b.severity] ?? 0) - (SEV_RANK[a.severity] ?? 0) || b.issues.length - a.issues.length || a.file.localeCompare(b.file));
+  }, [issues]);
 
-  const handleRefresh = () => {
-    // We could pass an onRefresh callback to force reload,
-    // but the instruction says: "refresh button: onClick: re-fetch analysis".
-    // We can emit a custom event or let App.jsx handle it.
-    // For now, we'll reload the page if onRefresh is not provided, 
-    // or better, dispatch an event.
-    window.location.reload();
-  };
+  const visibleGroups = useMemo(
+    () =>
+      filter === 'all'
+        ? groups
+        : groups.map((g) => ({ ...g, issues: g.issues.filter((i) => i.severity === filter) })).filter((g) => g.issues.length),
+    [groups, filter],
+  );
 
-  // Calculate Issue Counts
-  const highCount = analysis?.issues?.filter(i => i.severity === 'high').length || 0;
-  const mediumCount = analysis?.issues?.filter(i => i.severity === 'medium').length || 0;
-  const lowCount = analysis?.issues?.filter(i => i.severity === 'low').length || 0;
+  if (isLoading || !analysis) return <HealthSkeleton />;
 
-  // Group issues by file
-  const groupedIssues = useMemo(() => {
-    if (!analysis?.issues) return [];
-    const grouped = {};
-    for (const issue of analysis.issues) {
-      if (!grouped[issue.file]) {
-        grouped[issue.file] = {
-          file: issue.file,
-          severity: issue.severity, // initial
-          issues: []
-        };
-      }
-      grouped[issue.file].issues.push(issue);
-      // Determine worst severity
-      const ranks = { high: 3, medium: 2, low: 1, info: 0 };
-      if (ranks[issue.severity] > ranks[grouped[issue.file].severity]) {
-        grouped[issue.file].severity = issue.severity;
-      }
-    }
-    
-    return Object.values(grouped).sort((a, b) => {
-      const ranks = { high: 3, medium: 2, low: 1, info: 0 };
-      if (ranks[a.severity] !== ranks[b.severity]) {
-        return ranks[b.severity] - ranks[a.severity]; // worst first
-      }
-      return a.file.localeCompare(b.file);
+  const isOpen = (file, index) => (openGroups ? openGroups.has(file) : index < GROUPS_OPEN_BY_DEFAULT);
+  const toggleGroup = (file, index) =>
+    setOpenGroups((prev) => {
+      const base = prev ?? new Set(visibleGroups.slice(0, GROUPS_OPEN_BY_DEFAULT).map((g) => g.file));
+      const next = new Set(base);
+      if (isOpen(file, index)) next.delete(file);
+      else next.add(file);
+      return next;
     });
-  }, [analysis?.issues]);
 
-  const filteredGroups = useMemo(() => {
-    if (activeFilter === 'All') return groupedIssues;
-    return groupedIssues.map(g => ({
-      ...g,
-      issues: g.issues.filter(i => i.severity === activeFilter)
-    })).filter(g => g.issues.length > 0);
-  }, [groupedIssues, activeFilter]);
+  const nodeForIssue = (issue) =>
+    graph?.nodes?.find((n) => issue.function && n.label === issue.function && n.file === issue.file) ||
+    graph?.nodes?.find((n) => n.id === issue.file);
 
-  const fileNodes = graph?.nodes?.filter(n => n.type === 'file') || [];
-
-  const renderContent = () => {
-    if (activeTab === 'chat') {
-      return (
-        <>
-        {/* Tab Bar */}
-        <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={() => setActiveTab('health')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ⬡ Health
-          </button>
-          <button
-            onClick={() => setActiveTab('chat')}
-            className="bg-bg text-white font-mono text-xs font-medium px-2 py-1.5 rounded-md"
-          >
-            ✦ Chat
-          </button>
-          <button
-            onClick={() => setActiveTab('simulate')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ⚡ Simulate
-          </button>
-        </div>
-        <div className="flex-1 overflow-hidden relative">
-          <ChatSidebar
-            jobId={jobId}
-            graph={graph}
-            onNodeHighlight={onNodeHighlight}
-            onNodeClick={onNodeClick}
-          />
-          </div>
-        </>
-      );
-    }
-
-    if (activeTab === 'simulate') {
-      return (
-        <>
-        {/* Tab Bar */}
-        <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={() => setActiveTab('health')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ⬡ Health
-          </button>
-          <button
-            onClick={() => setActiveTab('chat')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ✦ Chat
-          </button>
-          <button
-            onClick={() => setActiveTab('simulate')}
-            className="bg-bg text-white font-mono text-xs font-medium px-2 py-1.5 rounded-md"
-          >
-            ⚡ Simulate
-          </button>
-        </div>
-        <div className="flex-1 overflow-hidden relative">
-          <SimulatorPanel
-            graph={graph}
-            jobId={jobId}
-            onBlastRadiusChange={onBlastRadiusChange}
-            onSimulationModeChange={onSimulationModeChange}
-            onNodeHighlight={onNodeHighlight}
-            onNodeNavigate={onNodeClick}
-            simulationSourceFile={simulationSourceFile}
-          />
-          </div>
-        </>
-      );
-    }
-
-    return (
-      <>
-      {/* Tab Bar */}
-      <div className="h-12 bg-surface border-b border-border px-2 flex items-center gap-1 flex-shrink-0 justify-between">
-        <div className="flex gap-1">
-          <button
-            onClick={() => setActiveTab('health')}
-            className="bg-bg text-white font-mono text-xs font-medium px-2 py-1.5 rounded-md"
-          >
-            ⬡ Health
-          </button>
-          <button
-            onClick={() => setActiveTab('chat')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ✦ Chat
-          </button>
-          <button
-            onClick={() => setActiveTab('simulate')}
-            className="text-muted hover:text-white font-mono text-xs px-2 py-1.5 rounded-md hover:bg-surface-hover transition-colors"
-          >
-            ⚡ Simulate
-          </button>
-        </div>
-        <button
-          onClick={handleRefresh}
-          className="text-muted hover:text-white text-sm px-2"
-          title="Re-run analysis"
-        >
-          ↻
-        </button>
-      </div>
-
-      {/* Health Tab Content */}
-      <div className="flex-1 overflow-y-auto pb-6">
-        {isLoading || !analysis ? (
-          // Skeleton Loader
-          <div className="animate-pulse">
-            <div className="mx-3 mt-3 rounded-xl border border-border p-4 h-48 bg-surface-hover" />
-            <div className="mx-3 mt-3 flex gap-2">
-              <div className="flex-1 bg-surface-hover rounded-lg h-20" />
-              <div className="flex-1 bg-surface-hover rounded-lg h-20" />
-              <div className="flex-1 bg-surface-hover rounded-lg h-20" />
-            </div>
-            <div className="mx-3 mt-4 mb-2 h-4 w-32 bg-surface-hover rounded" />
-            <div className="mx-3 mb-2 rounded-lg h-16 bg-surface-hover" />
-            <div className="mx-3 mb-2 rounded-lg h-16 bg-surface-hover" />
-            <div className="mx-3 mb-2 rounded-lg h-16 bg-surface-hover" />
-          </div>
-        ) : (
-          <>
-            {/* Section 1: Health score card */}
-            <div
-              className={`mx-3 mt-3 rounded-xl border p-4 ${
-                analysis.grade === 'A' ? 'border-green-500/40 bg-green-500/8' :
-                analysis.grade === 'B' ? 'border-green-400/40 bg-green-400/6' :
-                analysis.grade === 'C' ? 'border-yellow-500/40 bg-yellow-500/8' :
-                analysis.grade === 'D' ? 'border-orange-500/40 bg-orange-500/8' :
-                'border-red-500/40 bg-red-500/8'
-              }`}
-            >
-              <div className="text-6xl font-mono font-bold text-center" style={{ color: analysis.grade_color }}>
-                {analysis.grade}
-              </div>
-              <div className="text-center font-mono text-sm text-muted mt-1">
-                {analysis.score} / 100
-              </div>
-              <div className="text-center text-xs font-mono mt-0.5" style={{ color: analysis.grade_color }}>
-                {analysis.grade === 'A' ? 'Excellent' :
-                 analysis.grade === 'B' ? 'Good' :
-                 analysis.grade === 'C' ? 'Fair' :
-                 analysis.grade === 'D' ? 'Poor' : 'Critical'}
-              </div>
-              
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                {[
-                  { label: "Files", val: analysis.metrics?.total_files },
-                  { label: "Functions", val: analysis.metrics?.total_functions },
-                  { label: "Classes", val: analysis.metrics?.total_classes },
-                  { label: "Avg Lines/Fn", val: analysis.metrics?.avg_function_length?.toFixed(0) },
-                  { label: "Dead Code", val: analysis.metrics?.dead_code_count },
-                  { label: "Circ. Imports", val: analysis.metrics?.circular_import_count },
-                ].map((m, i) => (
-                  <div key={i} className="bg-bg/50 rounded-lg p-2 text-center flex flex-col justify-center min-h-[50px]">
-                    <div className="text-white font-mono text-sm font-medium">{m.val ?? 0}</div>
-                    <div className="text-muted font-mono text-[10px] mt-0.5">{m.label}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Section 2: Issues summary bar */}
-            <div className="mx-3 mt-3 flex gap-2">
-              <div className="flex-1 bg-red-500/10 border border-red-500/30 rounded-lg p-2.5 text-center flex flex-col justify-center min-h-[64px]">
-                <div className="w-1.5 h-1.5 rounded-full bg-red-500 mx-auto mb-1" />
-                <div className="text-red-400 font-mono text-lg font-bold leading-none">{highCount}</div>
-                <div className="text-xs text-muted font-mono mt-1 leading-none">High</div>
-              </div>
-              <div className="flex-1 bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-2.5 text-center flex flex-col justify-center min-h-[64px]">
-                <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 mx-auto mb-1" />
-                <div className="text-yellow-400 font-mono text-lg font-bold leading-none">{mediumCount}</div>
-                <div className="text-xs text-muted font-mono mt-1 leading-none">Medium</div>
-              </div>
-              <div className="flex-1 bg-gray-500/10 border border-gray-500/30 rounded-lg p-2.5 text-center flex flex-col justify-center min-h-[64px]">
-                <div className="w-1.5 h-1.5 rounded-full bg-gray-500 mx-auto mb-1" />
-                <div className="text-gray-400 font-mono text-lg font-bold leading-none">{lowCount}</div>
-                <div className="text-xs text-muted font-mono mt-1 leading-none">Low</div>
-              </div>
-            </div>
-
-            {/* Section 3: Detected patterns */}
-            {analysis.patterns && analysis.patterns.length > 0 && (
-              <>
-                <div className="text-xs font-mono text-muted uppercase tracking-wider mx-3 mt-4 mb-2">
-                  PATTERNS DETECTED
-                </div>
-                {analysis.patterns.map((pattern, idx) => (
-                  <div
-                    key={idx}
-                    className="mx-3 mb-2 bg-green-500/8 border border-green-500/25 rounded-lg px-3 py-2.5 cursor-pointer hover:bg-green-500/10 transition-colors"
-                    onClick={() => {
-                      const fileNode = graph?.nodes?.find(n => n.id === pattern.file);
-                      if (fileNode && onNodeHighlight) onNodeHighlight([fileNode.id]);
-                    }}
-                  >
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-green-500" />
-                      <div className="text-green-400 font-mono text-xs font-medium">{pattern.name}</div>
-                      <div className="ml-auto text-[10px] text-muted font-mono truncate max-w-[120px]" title={pattern.file}>
-                        {pattern.file.split("/").at(-1)}
-                      </div>
-                    </div>
-                    <div className="text-[11px] text-muted mt-1 font-sans leading-relaxed">
-                      {pattern.description}
-                    </div>
-                  </div>
-                ))}
-              </>
-            )}
-
-            {/* Section 4: Issues list */}
-            <div className="flex items-center justify-between mx-3 mt-4 mb-2">
-              <div className="text-xs font-mono text-muted uppercase tracking-wider">ISSUES</div>
-              <div className="flex gap-1">
-                {['All', 'high', 'medium', 'low'].map(f => (
-                  <button
-                    key={f}
-                    onClick={() => setActiveFilter(f)}
-                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full transition-colors ${
-                      activeFilter === f ? 'bg-surface text-white' : 'text-muted hover:text-white'
-                    }`}
-                  >
-                    {f === 'All' ? 'All' :
-                     f === 'high' ? '🔴 High' :
-                     f === 'medium' ? '🟡 Med' : '⚪ Low'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {filteredGroups.length === 0 ? (
-              <div className="mx-3 text-xs font-mono text-muted text-center py-4">No issues found.</div>
-            ) : (
-              filteredGroups.map(group => (
-                <div key={group.file} className="mb-3">
-                  {/* File Header */}
-                  <div
-                    className="flex items-center gap-2 mx-3 mt-2 mb-1 cursor-pointer hover:opacity-80"
-                    onClick={() => {
-                      const fileNode = graph?.nodes?.find(n => n.id === group.file);
-                      if (fileNode) {
-                        if (onNodeHighlight) onNodeHighlight([fileNode.id]);
-                        if (onNodeClick) onNodeClick(fileNode);
-                      }
-                    }}
-                    title={group.file}
-                  >
-                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                      group.severity === 'high' ? 'bg-red-500' :
-                      group.severity === 'medium' ? 'bg-yellow-500' : 'bg-gray-500'
-                    }`} />
-                    <div className="font-mono text-xs text-white/80 truncate">
-                      {group.file.split("/").at(-1)}
-                    </div>
-                    <div className={`ml-auto text-[10px] font-mono ${
-                      group.severity === 'high' ? 'text-red-400' :
-                      group.severity === 'medium' ? 'text-yellow-400' : 'text-gray-400'
-                    }`}>
-                      {group.issues.length}
-                    </div>
-                  </div>
-
-                  {/* Issues */}
-                  {group.issues.map(issue => (
-                    <div
-                      key={issue.id}
-                      className={`mx-4 mb-1.5 rounded-lg px-2.5 py-2 text-xs font-sans cursor-pointer hover:opacity-80 transition-opacity ${
-                        issue.severity === 'high' ? 'bg-red-500/8 border border-red-500/20' :
-                        issue.severity === 'medium' ? 'bg-yellow-500/8 border border-yellow-500/20' :
-                        issue.severity === 'low' ? 'bg-gray-500/8 border border-gray-500/20' :
-                        'bg-green-500/8 border border-green-500/20'
-                      }`}
-                      onClick={() => {
-                        // Find the exact node to click/highlight
-                        const node = graph?.nodes?.find(n => 
-                          (issue.function && n.label === issue.function && n.file === issue.file) ||
-                          (!issue.function && n.id === issue.file)
-                        ) || graph?.nodes?.find(n => n.id === issue.file);
-                        
-                        if (node) {
-                          if (onNodeHighlight) onNodeHighlight([node.id]);
-                          if (onNodeClick) onNodeClick(node);
-                        }
-                      }}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px]">
-                          {issue.severity === 'high' ? '🔴' :
-                           issue.severity === 'medium' ? '🟡' : '⚪'}
-                        </span>
-                        <span className={`text-[10px] font-mono uppercase ${
-                          issue.type === 'security' ? 'text-red-400' :
-                          issue.type === 'quality' ? 'text-yellow-400' :
-                          issue.type === 'pattern' ? 'text-green-400' : 'text-gray-400'
-                        }`}>
-                          {issue.type}
-                        </span>
-                        <span className="ml-auto text-[10px] text-muted font-mono">
-                          :{issue.line}
-                        </span>
-                      </div>
-                      <div className="text-[11px] text-white/70 mt-1 leading-relaxed">
-                        {issue.message}
-                      </div>
-                      {issue.function && (
-                        <div className="text-[10px] text-muted font-mono mt-0.5">
-                          in {issue.function}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ))
-            )}
-
-            {/* Section 5: File health heatmap */}
-            <div className="text-xs font-mono text-muted uppercase tracking-wider mx-3 mt-6 mb-2 border-t border-border pt-4">
-              FILE HEALTH
-            </div>
-            <div className="mx-3 flex flex-wrap gap-1.5 pb-4">
-              {fileNodes.map(fn => {
-                const fa = analysis?.by_file?.[fn.id];
-                const sev = fa ? fa.severity : null;
-                const c = 
-                  sev === 'high' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
-                  sev === 'medium' ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' :
-                  sev === 'low' ? 'bg-gray-500/20 text-gray-400 border border-gray-500/30' :
-                  'bg-green-500/20 text-green-400 border border-green-500/30';
-                
-                return (
-                  <div
-                    key={fn.id}
-                    className={`rounded px-2 py-1 font-mono text-[10px] cursor-pointer hover:opacity-80 transition-opacity ${c}`}
-                    title={fn.id}
-                    onClick={() => {
-                      if (onNodeHighlight) onNodeHighlight([fn.id]);
-                      if (onNodeClick) onNodeClick(fn);
-                    }}
-                  >
-                    {fn.id.split("/").at(-1)}
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </div>
-      </>
-    );
-  };
+  const m = analysis.metrics ?? {};
+  const stats = [
+    ['Files', m.total_files],
+    ['Functions', m.total_functions],
+    ['Classes', m.total_classes],
+    ['Avg lines/fn', m.avg_function_length != null ? Math.round(m.avg_function_length) : null],
+    ['Dead code', m.dead_code_count],
+    ['Circular imports', m.circular_import_count],
+  ];
+  const fileNodes = (graph?.nodes ?? []).filter((n) => n.type === 'file');
+  const linkBtn = cn('rounded text-cg-xs text-cg-secondary underline-offset-4 hover:text-cg-text hover:underline [@media(pointer:coarse)]:min-h-11', focusRing);
 
   return (
-    <>
-      {/* Mobile Backdrop */}
-      <div 
-        className={`md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-40 transition-opacity duration-300 ${hidden ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
-        onClick={onClose}
-      />
-      
-      {/* Drawer Container */}
-      <div className={`fixed md:relative inset-y-0 right-0 z-50 w-[320px] max-w-[85vw] flex-shrink-0 h-full bg-bg border-l border-border flex flex-col transition-transform duration-300 md:transition-none ${hidden ? 'max-md:translate-x-full md:hidden' : 'translate-x-0'}`}>
-        {renderContent()}
-      </div>
-    </>
+    <div className="flex flex-col gap-6 p-4">
+      <section className="flex items-center gap-4" aria-label="Health score">
+        <ScoreRing score={analysis.score} />
+        <div className="min-w-0">
+          <p className="text-cg-2xl font-semibold text-cg-text">
+            <span className="tabular-nums">{analysis.score}</span>
+            <span className="text-cg-tertiary"> · </span>
+            {analysis.grade}
+          </p>
+          <p className="text-cg-sm text-cg-secondary">{verdictLine(analysis.grade, counts)}</p>
+        </div>
+      </section>
+
+      <dl className="grid grid-cols-3 gap-x-3 gap-y-3">
+        {stats.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="truncate text-cg-xs text-cg-tertiary">{label}</dt>
+            <dd className="text-cg-base tabular-nums text-cg-text">{value ?? 0}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {analysis.patterns?.length > 0 && (
+        <section>
+          <h3 className="text-cg-xs font-medium text-cg-secondary">Patterns</h3>
+          <ul className="mt-2 flex flex-col gap-2">
+            {analysis.patterns.map((p, i) => (
+              <li key={i} className="text-cg-sm">
+                <span className="text-cg-text">{p.name}</span>
+                <span className="text-cg-tertiary"> · {p.file?.split('/').pop()}</span>
+                {p.description && <p className="text-cg-xs text-cg-secondary">{p.description}</p>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section>
+        <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter issues by severity">
+          <Badge onClick={() => setFilter('all')} selected={filter === 'all'}>
+            All <span className="tabular-nums">{issues.length}</span>
+          </Badge>
+          {['high', 'medium', 'low'].map((sev) => (
+            <Badge key={sev} tone={SEV_TONE[sev]} onClick={() => setFilter(sev)} selected={filter === sev}>
+              {sentenceCase(sev)} <span className="tabular-nums">{counts[sev]}</span>
+            </Badge>
+          ))}
+        </div>
+
+        {visibleGroups.length === 0 ? (
+          <p className="mt-4 text-cg-sm text-cg-tertiary">{issues.length ? 'No issues at this severity.' : 'No issues found.'}</p>
+        ) : (
+          <ul className="mt-3 flex flex-col">
+            {visibleGroups.map((g, gi) => {
+              const open = isOpen(g.file, gi);
+              const Chevron = open ? ChevronDown : ChevronRight;
+              return (
+                <li key={g.file} className="border-t border-cg-border first:border-t-0">
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    onClick={() => toggleGroup(g.file, gi)}
+                    title={g.file}
+                    className={cn('flex h-9 w-full items-center gap-2 rounded text-left text-cg-sm [@media(pointer:coarse)]:min-h-11', focusRing)}
+                  >
+                    <Chevron size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-cg-tertiary" />
+                    <span aria-hidden="true" className={cn('h-1.5 w-1.5 shrink-0 rounded-full', SEV_DOT[g.severity])} />
+                    <span className="min-w-0 flex-1 truncate text-cg-text">{g.file.split('/').pop()}</span>
+                    <span className="shrink-0 tabular-nums text-cg-xs text-cg-tertiary">{g.issues.length}</span>
+                  </button>
+                  {open && (
+                    <ul className="flex flex-col gap-3 pb-3 pl-6">
+                      {g.issues.map((issue, ii) => {
+                        const node = nodeForIssue(issue);
+                        return (
+                          <li key={issue.id ?? `${g.file}-${ii}`} className="text-cg-sm">
+                            <p className="flex items-center gap-1.5 text-cg-xs text-cg-tertiary">
+                              <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', SEV_DOT[issue.severity])} />
+                              <span className="sr-only">{sentenceCase(issue.severity)} severity, </span>
+                              {sentenceCase(issue.type)}
+                              {issue.line != null && <span className="ml-auto font-cg-mono">line {issue.line}</span>}
+                            </p>
+                            <p className="mt-0.5 text-cg-text">{issue.message}</p>
+                            {issue.function && <p className="font-cg-mono text-cg-xs text-cg-tertiary">in {issue.function}</p>}
+                            {node && (
+                              <p className="mt-1 flex gap-3">
+                                <button type="button" className={linkBtn} onClick={() => onNodeSelect(node)}>
+                                  Show in graph
+                                </button>
+                                <button type="button" className={linkBtn} onClick={() => onViewSource(node, issue.line)}>
+                                  View source
+                                </button>
+                              </p>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {fileNodes.length > 0 && (
+        <section>
+          <h3 className="text-cg-xs font-medium text-cg-secondary">File health</h3>
+          <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+            {fileNodes.map((fn) => {
+              const sev = analysis.by_file?.[fn.id]?.severity;
+              return (
+                <li key={fn.id}>
+                  <button
+                    type="button"
+                    title={`${fn.id}${sev ? ` · worst issue: ${sev}` : ' · no issues'}`}
+                    onClick={() => onNodeSelect(fn)}
+                    className={cn('inline-flex items-center gap-1.5 rounded text-cg-xs text-cg-secondary hover:text-cg-text [@media(pointer:coarse)]:min-h-11', focusRing)}
+                  >
+                    <span aria-hidden="true" className={cn('h-1.5 w-1.5 rounded-full', sev ? SEV_DOT[sev] : 'bg-cg-success')} />
+                    {fn.id.split('/').pop()}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+    </div>
   );
 }

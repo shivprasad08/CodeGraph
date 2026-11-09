@@ -1,117 +1,71 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { Check } from 'lucide-react';
+import { cn } from '../lib/cn';
 
-export default function ProgressBar({ progress, stage, message, startedAt, status }) {
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+const STAGES = [
+  { id: 'ingestion', label: 'Fetch' },
+  { id: 'parsing', label: 'Parse' },
+  { id: 'graph', label: 'Map' },
+  { id: 'enrichment', label: 'Summarize' },
+  { id: 'done', label: 'Done' },
+];
+
+const formatElapsed = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+
+/** Analysis progress for a running job: bar, stages, live message and elapsed time. */
+export default function ProgressBar({ progress = 0, stage, message, startedAt, repo }) {
+  const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
-    if (!startedAt || status === "done" || status === "error") {
-      return;
-    }
-    
-    const interval = setInterval(() => {
-      const now = new Date();
-      setElapsedSeconds(Math.floor((now - startedAt) / 1000));
-    }, 1000);
-    
-    // Initial calculation to prevent 1s delay
-    setElapsedSeconds(Math.floor((new Date() - startedAt) / 1000));
+    if (!startedAt) return undefined;
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startedAt]);
 
-    return () => clearInterval(interval);
-  }, [startedAt, status]);
-
-  const stages = [
-    { id: 'queued', label: 'Fetch' },
-    { id: 'ingestion', label: 'Fetch' },
-    { id: 'parsing', label: 'Parse' },
-    { id: 'graph', label: 'Graph' },
-    { id: 'enrichment', label: 'Enrich' },
-    { id: 'done', label: 'Done' }
-  ];
-  
-  // Condense queued and ingestion into the first visual pill (Fetch)
-  const displayStages = [
-    { id: 'ingestion', label: 'Fetch' },
-    { id: 'parsing', label: 'Parse' },
-    { id: 'graph', label: 'Graph' },
-    { id: 'enrichment', label: 'Enrich' },
-    { id: 'done', label: 'Done' }
-  ];
-
-  const currentStageIndex = displayStages.findIndex(s => s.id === stage || (stage === 'queued' && s.id === 'ingestion'));
-  const activeIndex = currentStageIndex === -1 ? 0 : currentStageIndex;
-
-  const isRunning = status === 'running' || status === 'queued';
-
-  let remainingText = null;
-  if (isRunning && progress > 5 && elapsedSeconds > 0) {
-    const rate = progress / elapsedSeconds;
-    const remaining = Math.ceil((100 - progress) / rate);
-    remainingText = `~${remaining}s remaining`;
-  }
-
-  const formatElapsed = (sec) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  };
+  const current = Math.max(0, STAGES.findIndex((s) => s.id === stage || (stage === 'queued' && s.id === 'ingestion')));
+  const pct = Math.max(0, Math.min(100, Math.round(progress || 0)));
 
   return (
-    <div className="w-full">
-      <div className="flex justify-between items-end mb-2">
-        <div className="font-mono text-sm text-muted">
-          {message || "Waiting..."}
-        </div>
-        <div className="text-right flex flex-col items-end">
-          {elapsedSeconds > 0 && (
-            <div className="text-xs text-muted font-mono">
-              {formatElapsed(elapsedSeconds)} elapsed
-            </div>
-          )}
-          {remainingText && (
-            <div className="text-xs text-muted font-mono mt-0.5">
-              {remainingText}
-            </div>
-          )}
-        </div>
-      </div>
-      
-      <div className="w-full bg-surface border border-border rounded-full h-2 overflow-hidden relative">
-        <div 
-          className="h-full bg-accent glow-accent relative overflow-hidden"
-          style={{ 
-            width: `${progress}%`,
-            transition: 'width 0.5s ease-in-out'
-          }}
-        >
-          {isRunning && (
-            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer" />
-          )}
-        </div>
-      </div>
-      
-      <div className="mt-6 flex items-center justify-between relative px-2">
-        {/* Connecting Line */}
-        <div className="absolute left-6 right-6 top-1/2 -translate-y-1/2 h-[1px] bg-border z-0" />
-        <div 
-          className="absolute left-6 top-1/2 -translate-y-1/2 h-[1px] bg-success z-0 transition-all duration-500" 
-          style={{ width: `calc(${Math.min(activeIndex, displayStages.length - 1) / (displayStages.length - 1)} * (100% - 3rem))` }}
-        />
+    <section aria-labelledby="progress-title" className="w-full max-w-md rounded-cg-panel border border-cg-border bg-cg-raised p-6 font-cg-sans shadow-cg-edge">
+      <h1 id="progress-title" className="text-cg-lg font-semibold text-cg-text">
+        Analyzing {repo ? <span className="font-cg-mono font-medium">{repo}</span> : 'repository'}
+      </h1>
+      <p className="mt-1 text-cg-sm text-cg-secondary">The first request on the free tier can take up to a minute.</p>
 
-        {displayStages.map((s, idx) => {
-          const isCompleted = idx < activeIndex || status === 'done';
-          const isActive = idx === activeIndex && isRunning;
-          
-          let pillColor = 'bg-surface text-muted border border-border';
-          if (isCompleted) pillColor = 'bg-success/20 text-success border border-success/40';
-          if (isActive) pillColor = 'bg-accent/20 text-accent border border-accent/40 animate-pulse-slow';
-          
-          return (
-            <div key={s.id} className={`relative z-10 rounded-full px-2.5 py-1 text-xs font-mono transition-all duration-300 ${pillColor}`}>
-              {s.label}
-            </div>
-          );
-        })}
+      <div
+        role="progressbar"
+        aria-label="Analysis progress"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="mt-5 h-1 overflow-hidden rounded-full bg-cg-hover"
+      >
+        <div className="h-full rounded-full bg-cg-text transition-[width] duration-cg-base ease-cg" style={{ width: `${pct}%` }} />
       </div>
-    </div>
+
+      <ol className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-cg-xs">
+        {STAGES.map((s, i) => (
+          <li
+            key={s.id}
+            aria-current={i === current ? 'step' : undefined}
+            className={cn('inline-flex items-center gap-1', i < current ? 'text-cg-secondary' : i === current ? 'font-medium text-cg-text' : 'text-cg-tertiary')}
+          >
+            {i < current && <Check size={12} strokeWidth={2} aria-hidden="true" />}
+            {s.label}
+          </li>
+        ))}
+      </ol>
+
+      <div className="mt-4 flex items-baseline justify-between gap-4 text-cg-sm">
+        <p aria-live="polite" className="min-w-0 truncate text-cg-secondary">
+          {message || 'Queued'}
+        </p>
+        <p className="shrink-0 font-cg-mono text-cg-xs text-cg-tertiary">
+          {pct}% · {formatElapsed(elapsed)}
+        </p>
+      </div>
+    </section>
   );
 }

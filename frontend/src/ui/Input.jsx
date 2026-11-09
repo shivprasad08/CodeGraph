@@ -12,12 +12,13 @@ import { cn } from '../lib/cn';
  * @param {string} [props.error] Error text; also switches the border to the error colour.
  * @param {import('react').ReactNode} [props.prefix] Static text before the value, e.g. "github.com/".
  * @param {import('react').ReactNode} [props.suffix] Static text or a control after the value.
+ * @param {'md'|'lg'} [props.size='md'] Field height 36 / 44px (lg pairs with a lg Button).
  * @param {string} [props.id] Defaults to a generated id.
  * @param {string} [props.className] Classes for the outer wrapper.
  * @param {string} [props.inputClassName] Classes for the <input>.
  */
 const Input = forwardRef(function Input(
-  { label, hideLabel = false, hint, error, prefix, suffix, id, className, inputClassName, ...props },
+  { label, hideLabel = false, hint, error, prefix, suffix, size = 'md', id, className, inputClassName, ...props },
   ref,
 ) {
   const generatedId = useId();
@@ -40,7 +41,8 @@ const Input = forwardRef(function Input(
       </label>
       <div
         className={cn(
-          'flex h-9 items-center overflow-hidden rounded-cg-control border bg-cg-canvas [@media(pointer:coarse)]:min-h-11',
+          'flex items-center overflow-hidden rounded-cg-control border bg-cg-canvas [@media(pointer:coarse)]:min-h-11',
+          size === 'lg' ? 'h-11' : 'h-9',
           'transition-colors duration-cg-fast ease-cg',
           'focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-cg-focus',
           error ? 'border-cg-sev-high' : 'border-cg-border-strong',
@@ -48,7 +50,13 @@ const Input = forwardRef(function Input(
         )}
       >
         {prefix && (
-          <span className="select-none whitespace-nowrap pl-3 font-cg-mono text-cg-sm text-cg-tertiary">
+          <span
+            className={cn(
+              'select-none whitespace-nowrap pl-3 font-cg-mono text-cg-tertiary',
+              size === 'lg' ? 'text-cg-base' : 'text-cg-sm',
+              '[@media(pointer:coarse)]:text-[16px]',
+            )}
+          >
             {prefix}
           </span>
         )}
@@ -59,7 +67,10 @@ const Input = forwardRef(function Input(
           {...props}
           aria-describedby={describedBy}
           className={cn(
-            'h-full min-w-0 flex-1 bg-transparent text-cg-sm text-cg-text outline-none',
+            'h-full min-w-0 flex-1 bg-transparent text-cg-text outline-none',
+            size === 'lg' ? 'text-cg-base' : 'text-cg-sm',
+            // 16px on touch so iOS Safari does not zoom the page when the field is focused
+            '[@media(pointer:coarse)]:text-[16px]',
             'placeholder:text-cg-tertiary disabled:cursor-not-allowed',
             prefix ? 'pl-0.5 pr-3' : 'px-3',
             inputClassName,

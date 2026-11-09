@@ -1,3 +1,4 @@
+import math
 import re
 import uuid
 import networkx as nx
@@ -350,23 +351,38 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
     
     return health_result
 
+HEALTH_DECAY = 1.2
+MAX_PATTERN_BONUS = 5
+
+
+def grade_for_score(score: int) -> str:
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 70:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "F"
+
+
 def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict]) -> dict:
-    score = 100
-    
+    """
+    Size-normalized health score. Issues are weighted (high 8, medium 3, low 1),
+    structural problems add weight too, and the total is divided by the number of
+    functions and classes, so a large repo is not penalized just for being large:
+        score = 100 * exp(-1.2 * weighted / items), plus a small pattern bonus (<= 5).
+    """
     high_count = sum(1 for i in issues if i["severity"] == "high")
     med_count = sum(1 for i in issues if i["severity"] == "medium")
     low_count = sum(1 for i in issues if i["severity"] == "low")
-    
-    score -= (high_count * 8)
-    score -= (med_count * 3)
-    score -= (low_count * 1)
-    score += (len(patterns) * 2)
-    
+
     # Additional Deductions & Metrics
     total_files = len([n for n in graph.get("nodes", []) if n.get("type") == "file"])
     total_functions = len([n for n in graph.get("nodes", []) if n.get("type") == "function"])
     total_classes = len([n for n in graph.get("nodes", []) if n.get("type") == "class"])
-    
+
     total_lines = 0
     max_function_length = 0
     for fn in [n for n in graph.get("nodes", []) if n.get("type") == "function"]:
@@ -376,39 +392,29 @@ def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict]) 
         total_lines += length
         if length > max_function_length:
             max_function_length = length
-            
+
     avg_function_length = total_lines / total_functions if total_functions > 0 else 0
-    
+
     dead_code_count = sum(1 for i in issues if i["type"] == "dead_code")
     circular_import_count = sum(1 for i in issues if "Circular import" in i["message"]) / 2 # since it flags both A->B and B->A in a cycle
-    
-    if circular_import_count > 0:
-        score -= (circular_import_count * 10)
-        
+
+    items = max(total_functions + total_classes, 1)
+    weighted = 8 * high_count + 3 * med_count + 1 * low_count
+    # Structural penalties, expressed as weight so they scale with repo size too
+    weighted += 10 * circular_import_count
     if total_functions > 0 and (dead_code_count / total_functions) > 0.2:
-        score -= 10
-        
+        weighted += 0.10 * items  # roughly -10 points on an otherwise clean repo
     if avg_function_length > 40:
-        score -= 5
-        
-    score = max(0, min(100, int(score))) # clamp 0-100
-    
-    if score >= 90:
-        grade = "A"
-        grade_color = "#22c55e" # green
-    elif score >= 80:
-        grade = "B"
-        grade_color = "#4ade80" # light green
-    elif score >= 70:
-        grade = "C"
-        grade_color = "#eab308" # yellow
-    elif score >= 60:
-        grade = "D"
-        grade_color = "#f97316" # orange
-    else:
-        grade = "F"
-        grade_color = "#ef4444" # red
-        
+        weighted += 0.05 * items  # roughly -5 points
+
+    density = weighted / items
+    score = 100 * math.exp(-HEALTH_DECAY * density) + min(len(patterns), MAX_PATTERN_BONUS)
+    score = max(0, min(100, round(score))) # clamp 0-100
+
+    grade = grade_for_score(score)
+    # Kept for API compatibility; the frontend no longer uses these colours
+    grade_color = {"A": "#22c55e", "B": "#4ade80", "C": "#eab308", "D": "#f97316", "F": "#ef4444"}[grade]
+
     # Most complex file
     file_complexity = {}
     for n in graph.get("nodes", []):

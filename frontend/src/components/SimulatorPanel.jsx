@@ -1,426 +1,340 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { CornerDownRight, X, Zap } from 'lucide-react';
 import { streamImpactAnalysis } from '../api';
 import { computeBlastRadius, detectBrokenPipelines } from '../utils/blastRadius';
+import { cn } from '../lib/cn';
+import { Badge, Button, IconButton, Input, focusRing } from '../ui';
+import { TYPE_DOT, typeKey } from './app/NodeDetails';
 
+const RISK = {
+  SAFE: ['bg-cg-success', 'Safe', 'Change appears low-risk'],
+  CAUTION: ['bg-cg-sev-med', 'Caution', 'Review the affected components'],
+  RISKY: ['bg-cg-sev-high', 'Risky', 'A significant cascade is possible'],
+  DANGEROUS: ['bg-cg-sev-high', 'Dangerous', 'High risk of breaking changes'],
+};
+const CHANGE_IDEAS = ['Change the logic', 'Rename this', 'Add a parameter', 'Remove this function'];
+
+/**
+ * Impact tab: pick a node, optionally describe the change, run the blast-radius
+ * simulation (computed locally) and, when online, the AI impact analysis.
+ */
 export default function SimulatorPanel({
   graph,
-  jobId,
   onBlastRadiusChange,
   onSimulationModeChange,
   onNodeHighlight,
   onNodeNavigate,
-  simulationSourceFile
+  simulationSourceFile,
+  offline = false, // static demo: blast radius runs locally, AI analysis needs the backend
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
   const [changeDescription, setChangeDescription] = useState('');
-  
-  const [isSimulating, setIsSimulating] = useState(false);
-  const [simulationResultVisible, setSimulationResultVisible] = useState(false);
+  const [resultVisible, setResultVisible] = useState(false);
   const [isLoadingLLM, setIsLoadingLLM] = useState(false);
   const [llmResponse, setLLMResponse] = useState('');
-  const [riskLevel, setRiskLevel] = useState(null); // SAFE, CAUTION, RISKY, DANGEROUS
-  
+  const [riskLevel, setRiskLevel] = useState(null);
   const [blastResult, setBlastResult] = useState(null);
   const [brokenPipelines, setBrokenPipelines] = useState([]);
-  
   const responseEndRef = useRef(null);
-  
-  // Auto-select node if passed from context menu
+
+  // Pre-select a node passed in from Details or the file menu
   useEffect(() => {
     if (simulationSourceFile && graph?.nodes) {
-      const node = graph.nodes.find(n => n.id === simulationSourceFile);
+      const node = graph.nodes.find((n) => n.id === simulationSourceFile);
       if (node) setSelectedNode(node);
     }
   }, [simulationSourceFile, graph]);
 
   useEffect(() => {
-    if (isLoadingLLM) {
-      responseEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }
+    if (isLoadingLLM) responseEndRef.current?.scrollIntoView({ block: 'nearest' });
   }, [llmResponse, isLoadingLLM]);
 
-  const handleSelectSource = (node) => {
+  const selectSource = (node) => {
     setSelectedNode(node);
     setSearchTerm('');
-    // Highlight it in graph temporarily
-    if (onNodeHighlight) onNodeHighlight([node.id]);
+    onNodeHighlight?.([node.id]);
   };
 
-  const handleClearSelection = () => {
-    setSelectedNode(null);
-    if (simulationResultVisible) handleExitSimulation();
-  };
-
-  const runSimulation = () => {
-    if (!selectedNode || !graph) return;
-    
-    setIsSimulating(true);
-    setLLMResponse('');
-    setRiskLevel(null);
-    
-    // 1. Client-side blast radius
-    const blastRes = computeBlastRadius(graph, [selectedNode.id]);
-    
-    // 2. Client-side pipeline break detection
-    const pipelines = detectBrokenPipelines(graph, new Set(blastRes.affected.keys()));
-    
-    setBlastResult(blastRes);
-    setBrokenPipelines(pipelines);
-    
-    // Update parent
-    if (onBlastRadiusChange) onBlastRadiusChange(blastRes);
-    if (onSimulationModeChange) onSimulationModeChange(true);
-    
-    setSimulationResultVisible(true);
-    setIsLoadingLLM(true);
-    setIsSimulating(false);
-    
-    // 3. Backend impact analysis stream
-    streamImpactAnalysis(
-      jobId,
-      selectedNode.id,
-      changeDescription,
-      {
-        affected_count: blastRes.stats.total,
-        critical_nodes: [...blastRes.affected.entries()]
-          .filter(([_, d]) => d.severity === "critical")
-          .map(([id]) => id),
-        broken_pipelines: pipelines.map(p => ({
-          entry_point: p.entryPoint.id,
-          risk: p.risk
-        }))
-      },
-      (token) => {
-        setLLMResponse(prev => prev + token);
-      },
-      ({ riskLevel, nodes }) => {
-        setRiskLevel(riskLevel);
-        setIsLoadingLLM(false);
-      },
-      (err) => {
-        setLLMResponse(prev => prev + `\n\nError: ${err}`);
-        setIsLoadingLLM(false);
-      }
-    );
-  };
-
-  const handleExitSimulation = () => {
-    if (onSimulationModeChange) onSimulationModeChange(false);
-    if (onBlastRadiusChange) onBlastRadiusChange(null);
-    setSimulationResultVisible(false);
+  const exitSimulation = () => {
+    onSimulationModeChange?.(false);
+    onBlastRadiusChange?.(null);
+    setResultVisible(false);
     setBlastResult(null);
     setLLMResponse('');
     setRiskLevel(null);
   };
 
-  // Search results
-  const searchResults = searchTerm && graph?.nodes 
-    ? graph.nodes.filter(n => 
-        n.label.toLowerCase().includes(searchTerm.toLowerCase()) || 
-        (n.file && n.file.toLowerCase().includes(searchTerm.toLowerCase()))
-      ).slice(0, 10)
-    : [];
-
-  // Parse inline `node::id` references
-  const renderLLMText = (text) => {
-    const parts = text.split(/`([^`]+)`/g);
-    return parts.map((part, i) => {
-      if (i % 2 === 1) {
-        // Is this a node reference? Check if it exists in graph
-        const nodeExists = graph?.nodes?.some(n => n.id === part || n.label === part);
-        if (nodeExists) {
-          return (
-            <span 
-              key={i} 
-              className="text-purple-400 font-mono bg-purple-500/10 px-1 rounded cursor-pointer hover:bg-purple-500/20 transition-colors"
-              onClick={() => {
-                const targetNode = graph.nodes.find(n => n.id === part || n.label === part);
-                if (targetNode) {
-                  if (onNodeHighlight) onNodeHighlight([targetNode.id]);
-                  if (onNodeNavigate) onNodeNavigate(targetNode);
-                }
-              }}
-            >
-              {part}
-            </span>
-          );
-        }
-        return <code key={i} className="bg-surface-hover px-1 rounded text-[#eab308] font-mono">{part}</code>;
-      }
-      return <span key={i}>{part}</span>;
-    });
+  const clearSelection = () => {
+    setSelectedNode(null);
+    if (resultVisible) exitSimulation();
   };
 
+  const runSimulation = () => {
+    if (!selectedNode || !graph) return;
+    setLLMResponse('');
+    setRiskLevel(null);
+
+    const blast = computeBlastRadius(graph, [selectedNode.id]);
+    const pipelines = detectBrokenPipelines(graph, new Set(blast.affected.keys()));
+    setBlastResult(blast);
+    setBrokenPipelines(pipelines);
+    onBlastRadiusChange?.(blast);
+    onSimulationModeChange?.(true);
+    setResultVisible(true);
+
+    if (offline) {
+      setLLMResponse('AI impact analysis is available on your own analyses.');
+      return;
+    }
+    setIsLoadingLLM(true);
+    streamImpactAnalysis(
+      graph.repo,
+      graph.commit_sha,
+      selectedNode.id,
+      changeDescription,
+      {
+        affected_count: blast.stats.total,
+        critical_nodes: [...blast.affected.entries()].filter(([, d]) => d.severity === 'critical').map(([id]) => id),
+        broken_pipelines: pipelines.map((p) => ({ entry_point: p.entryPoint.id, risk: p.risk })),
+      },
+      (token) => setLLMResponse((prev) => prev + token),
+      ({ riskLevel: level }) => {
+        setRiskLevel(level);
+        setIsLoadingLLM(false);
+      },
+      (err) => {
+        setLLMResponse((prev) => `${prev}${prev ? '\n\n' : ''}The AI analysis didn't finish (${err}). Try again in a minute.`);
+        setIsLoadingLLM(false);
+      },
+    );
+  };
+
+  const searchResults =
+    searchTerm && graph?.nodes
+      ? graph.nodes
+          .filter((n) => n.label.toLowerCase().includes(searchTerm.toLowerCase()) || n.file?.toLowerCase().includes(searchTerm.toLowerCase()))
+          .slice(0, 10)
+      : [];
+
+  const nodeById = (id) => graph?.nodes?.find((n) => n.id === id || n.label === id);
+
+  const renderLLMText = (text) =>
+    text.split(/`([^`]+)`/g).map((part, i) => {
+      if (i % 2 === 0) return <span key={i}>{part}</span>;
+      const target = nodeById(part);
+      return target ? (
+        <button
+          key={i}
+          type="button"
+          onClick={() => {
+            onNodeHighlight?.([target.id]);
+            onNodeNavigate?.(target);
+          }}
+          className={cn('mx-0.5 rounded border border-cg-border-strong px-1 font-cg-mono text-cg-xs text-cg-text hover:bg-cg-hover', focusRing)}
+        >
+          {part}
+        </button>
+      ) : (
+        <code key={i} className="mx-0.5 rounded bg-cg-overlay px-1 font-cg-mono text-cg-xs text-cg-text">
+          {part}
+        </code>
+      );
+    });
+
+  const affectedBy = (sev) => (blastResult ? [...blastResult.affected.entries()].filter(([, d]) => d.severity === sev) : []);
+  const AffectedRow = ({ id, depth }) => {
+    const node = nodeById(id);
+    return (
+      <button
+        type="button"
+        onClick={() => node && onNodeNavigate?.(node)}
+        style={{ paddingLeft: depth * 12 }}
+        className={cn('flex h-7 w-full items-center gap-1.5 rounded text-left text-cg-sm text-cg-text hover:bg-cg-hover [@media(pointer:coarse)]:min-h-11', focusRing)}
+      >
+        <CornerDownRight size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-cg-tertiary" />
+        <span className="truncate">{node?.label || id}</span>
+      </button>
+    );
+  };
+
+  const sectionTitle = 'text-cg-xs font-medium text-cg-secondary';
+
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-bg">
-      {/* Section 1: Node Selector */}
-      <div className="flex-shrink-0">
-        <div className="text-[10px] font-mono text-muted uppercase tracking-wider mx-3 mt-3 mb-2">
-          Select a file or function to simulate changes
-        </div>
-        
+    <div className="flex flex-col gap-5 p-4">
+      <section>
+        <h3 className={sectionTitle}>Node to change</h3>
         {!selectedNode ? (
-          <div className="relative mx-3">
-            <input
-              type="text"
+          <div className="relative mt-2">
+            <Input
+              label="Search files or functions"
+              hideLabel
+              placeholder="Search files or functions"
               value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Search files or functions..."
-              className="w-full bg-surface border border-border rounded-lg px-3 py-2 font-mono text-xs text-white placeholder:text-muted focus:border-accent outline-none"
+              onChange={(e) => setSearchTerm(e.target.value)}
+              autoComplete="off"
             />
             {searchResults.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-surface border border-border rounded-lg shadow-xl z-20">
-                {searchResults.map(n => (
-                  <div
-                    key={n.id}
-                    onClick={() => handleSelectSource(n)}
-                    className="py-2 px-3 flex items-center gap-2 cursor-pointer hover:bg-surface-hover transition-colors"
-                  >
-                    <div className={`w-2 h-2 rounded-full ${
-                      n.type === 'file' ? 'bg-blue-500' :
-                      n.type === 'class' ? 'bg-yellow-500' : 'bg-purple-500'
-                    }`} />
-                    <div className="font-mono text-xs text-white truncate">{n.label}</div>
-                    <div className="text-[10px] text-muted truncate ml-auto max-w-[100px]">{n.file}</div>
-                  </div>
+              <ul className="absolute inset-x-0 top-full z-20 mt-1 max-h-60 overflow-y-auto rounded-cg-control border border-cg-border bg-cg-overlay p-1 shadow-cg-edge">
+                {searchResults.map((n) => (
+                  <li key={n.id}>
+                    <button
+                      type="button"
+                      onClick={() => selectSource(n)}
+                      className={cn('flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left text-cg-sm hover:bg-cg-hover [@media(pointer:coarse)]:min-h-11', focusRing)}
+                    >
+                      <span aria-hidden="true" className={cn('h-1.5 w-1.5 shrink-0 rounded-full', TYPE_DOT[typeKey(n)])} />
+                      <span className="truncate text-cg-text">{n.label}</span>
+                      <span className="ml-auto max-w-[45%] truncate font-cg-mono text-cg-xs text-cg-tertiary">{n.file}</span>
+                    </button>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
+            <p className="mt-3 text-cg-sm text-cg-tertiary">Select a node, then run Simulate impact.</p>
           </div>
         ) : (
-          <div className="mx-3 bg-surface border border-border rounded-lg px-3 py-2.5 flex items-center gap-2">
-            <div className={`w-2.5 h-2.5 rounded-full ${
-              selectedNode.type === 'file' ? 'bg-blue-500' :
-              selectedNode.type === 'class' ? 'bg-yellow-500' : 'bg-purple-500'
-            }`} />
-            <div className="overflow-hidden">
-              <div className="font-mono text-sm text-white font-medium truncate">{selectedNode.label}</div>
-              <div className="text-[10px] text-muted mt-0.5 font-mono truncate">{selectedNode.file}</div>
+          <div className="mt-2 flex items-center gap-2 rounded-cg-control border border-cg-border bg-cg-canvas py-2 pl-3 pr-1">
+            <span aria-hidden="true" className={cn('h-2 w-2 shrink-0 rounded-full', TYPE_DOT[typeKey(selectedNode)])} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-cg-sm font-medium text-cg-text">{selectedNode.label}</p>
+              <p className="truncate font-cg-mono text-cg-xs text-cg-tertiary">{selectedNode.file}</p>
             </div>
-            <button 
-              onClick={handleClearSelection}
-              className="ml-auto text-muted hover:text-white px-2 text-lg leading-none"
-            >
-              ×
-            </button>
+            <IconButton label="Clear selection" size="sm" onClick={clearSelection}>
+              <X size={16} strokeWidth={1.5} aria-hidden="true" />
+            </IconButton>
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Section 2: Change description */}
-      <div className="flex-shrink-0">
-        <div className="text-[10px] font-mono text-muted uppercase tracking-wider mx-3 mt-4 mb-2">
-          Describe your change (optional)
-        </div>
+      <section>
+        <label htmlFor="change-description" className={sectionTitle}>
+          Describe the change <span className="text-cg-tertiary">(optional)</span>
+        </label>
         <textarea
+          id="change-description"
           value={changeDescription}
-          onChange={e => setChangeDescription(e.target.value)}
-          placeholder="e.g. Change token expiry from 24h to 1h, add extra validation step, rename this function..."
-          className="w-[calc(100%-1.5rem)] mx-3 bg-surface border border-border rounded-xl px-3 py-2.5 font-mono text-xs text-white placeholder:text-muted focus:border-accent outline-none resize-none"
+          onChange={(e) => setChangeDescription(e.target.value)}
+          placeholder="For example: change token expiry from 24h to 1h"
           rows={3}
+          className="mt-2 w-full resize-none rounded-cg-control border border-cg-border-strong bg-cg-canvas px-3 py-2 text-cg-sm text-cg-text outline-none placeholder:text-cg-tertiary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cg-focus [@media(pointer:coarse)]:text-[16px]"
         />
-        <div className="mx-3 mt-2 flex flex-wrap gap-1.5">
-          {["Change the logic", "Rename this", "Add a parameter", "Remove this function"].map(suggestion => (
-            <div 
-              key={suggestion}
-              onClick={() => setChangeDescription(suggestion)}
-              className="bg-surface border border-border rounded-full px-2 py-0.5 text-[10px] font-mono text-muted hover:text-white hover:border-accent/40 cursor-pointer transition-all"
-            >
-              {suggestion}
-            </div>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {CHANGE_IDEAS.map((idea) => (
+            <Badge key={idea} onClick={() => setChangeDescription(idea)} selected={changeDescription === idea}>
+              {idea}
+            </Badge>
           ))}
         </div>
-      </div>
+      </section>
 
-      {/* Section 3: Run Button */}
-      <div className="mx-3 mt-4 flex-shrink-0 mb-2">
-        <button
-          onClick={runSimulation}
-          disabled={!selectedNode || isSimulating || isLoadingLLM}
-          className="w-full bg-accent hover:bg-accent-light text-white font-mono text-sm py-2.5 rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-        >
-          {isSimulating || isLoadingLLM ? (
-            <>
-              <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Simulating...
-            </>
-          ) : (
-            "⚡ Run Simulation"
-          )}
-        </button>
-      </div>
+      <Button
+        variant="primary"
+        onClick={runSimulation}
+        disabled={!selectedNode}
+        loading={isLoadingLLM}
+        leadingIcon={<Zap size={16} strokeWidth={1.5} aria-hidden="true" />}
+        className="w-full"
+      >
+        Simulate impact
+      </Button>
 
-      {/* Section 4: Simulation Results */}
-      {simulationResultVisible && blastResult && (
-        <div className="flex-1 overflow-y-auto pb-4">
-          
-          {/* 4a. Risk level banner */}
-          <div className={`mx-3 mt-2 rounded-xl border px-4 py-3 flex items-center gap-3 ${
-            !riskLevel ? 'bg-surface border-border animate-pulse' :
-            riskLevel === 'SAFE' ? 'bg-green-500/15 border-green-500/40 text-green-400' :
-            riskLevel === 'CAUTION' ? 'bg-yellow-500/15 border-yellow-500/40 text-yellow-400' :
-            riskLevel === 'RISKY' ? 'bg-orange-500/15 border-orange-500/40 text-orange-400' :
-            'bg-red-500/15 border-red-500/40 text-red-400'
-          }`}>
-            <div className="text-2xl flex-shrink-0">
-              {!riskLevel ? "⚡" :
-               riskLevel === 'SAFE' ? "✓" :
-               riskLevel === 'CAUTION' ? "⚠" :
-               riskLevel === 'RISKY' ? "⚡" : "🔴"}
-            </div>
-            <div>
-              <div className="font-mono font-bold text-sm">
-                {!riskLevel ? "ANALYZING IMPACT..." : riskLevel}
-              </div>
-              <div className="text-[10px] opacity-70 mt-0.5 uppercase tracking-wide">
-                {!riskLevel ? "Scanning relationships" :
-                 riskLevel === 'SAFE' ? "Change appears low-risk" :
-                 riskLevel === 'CAUTION' ? "Review affected components" :
-                 riskLevel === 'RISKY' ? "Significant cascade possible" :
-                 "High risk of breaking changes"}
-              </div>
-            </div>
-          </div>
-
-          {/* 4b. Impact stats row */}
-          <div className="mx-3 mt-3 grid grid-cols-3 gap-2">
-            <div className="bg-surface border border-border rounded-lg p-2 text-center">
-              <div className="text-white font-mono font-bold text-lg leading-tight">{blastResult.stats.total}</div>
-              <div className="text-muted font-mono text-[10px] uppercase">Affected</div>
-            </div>
-            <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-2 text-center">
-              <div className="text-red-400 font-mono font-bold text-lg leading-tight">{blastResult.stats.bySeverity.critical || 0}</div>
-              <div className="text-red-400/70 font-mono text-[10px] uppercase">Direct</div>
-            </div>
-            <div className="bg-orange-500/10 border border-orange-500/20 rounded-lg p-2 text-center">
-              <div className="text-orange-400 font-mono font-bold text-lg leading-tight">{brokenPipelines.length}</div>
-              <div className="text-orange-400/70 font-mono text-[10px] uppercase tracking-tighter">Pipelines</div>
-            </div>
-          </div>
-
-          {/* 4c. Blast path visualization */}
-          <div className="mx-3 mt-4">
-            <div className="text-[10px] font-mono text-muted uppercase tracking-wider mb-2">Impact Cascade</div>
-            <div className="bg-surface/50 border border-border rounded-lg p-3 overflow-hidden text-xs font-mono space-y-1.5">
-              
-              {/* Depth 0 */}
-              <div className="text-white flex items-center gap-1.5 font-medium truncate">
-                <span className="text-[8px]">⬤</span> {selectedNode.label}
-              </div>
-              
-              {/* Depth 1 */}
-              {(() => {
-                const crit = [...blastResult.affected.entries()].filter(([_, d]) => d.severity === 'critical');
-                return crit.slice(0, 4).map(([id, d], i) => {
-                  const node = graph?.nodes?.find(n => n.id === id);
-                  return (
-                    <div 
-                      key={id} 
-                      className="text-red-400 flex items-center gap-1.5 truncate cursor-pointer hover:opacity-80 ml-3"
-                      onClick={() => {
-                        if (node && onNodeNavigate) onNodeNavigate(node);
-                      }}
-                    >
-                      <span className="text-muted">└─</span> <span className="text-[8px]">⬤</span> {node?.label || id}
-                    </div>
-                  );
-                }).concat(crit.length > 4 ? [
-                  <div key="crit-more" className="text-muted ml-3 pl-5 text-[10px]">
-                    + {crit.length - 4} more direct deps...
-                  </div>
-                ] : []);
-              })()}
-              
-              {/* Depth 2 */}
-              {(() => {
-                const high = [...blastResult.affected.entries()].filter(([_, d]) => d.severity === 'high');
-                if (high.length === 0) return null;
-                return high.slice(0, 3).map(([id, d], i) => {
-                  const node = graph?.nodes?.find(n => n.id === id);
-                  return (
-                    <div 
-                      key={id} 
-                      className="text-orange-400 flex items-center gap-1.5 truncate cursor-pointer hover:opacity-80 ml-6"
-                      onClick={() => {
-                        if (node && onNodeNavigate) onNodeNavigate(node);
-                      }}
-                    >
-                      <span className="text-muted">└─</span> <span className="text-[8px]">⬤</span> {node?.label || id}
-                    </div>
-                  );
-                }).concat(high.length > 3 ? [
-                  <div key="high-more" className="text-muted ml-6 pl-5 text-[10px]">
-                    + {high.length - 3} more secondary deps...
-                  </div>
-                ] : []);
-              })()}
-              
-              {/* Depth 3+ */}
-              {(() => {
-                const others = [...blastResult.affected.entries()].filter(([_, d]) => d.depth >= 3);
-                if (others.length === 0) return null;
-                return (
-                  <div className="text-muted flex items-center gap-1.5 truncate ml-6">
-                    <span className="text-muted">└─</span> {others.length} more transitive dependencies
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-
-          {/* 4d. Broken pipelines */}
-          {brokenPipelines.length > 0 && (
-            <div className="mx-3 mt-4">
-              <div className="text-[10px] font-mono text-muted uppercase tracking-wider mb-2">Pipelines at Risk</div>
-              {brokenPipelines.map((p, i) => (
-                <div key={i} className={`mb-2 rounded-lg border px-3 py-2 cursor-pointer transition-colors ${
-                  p.risk === 'high' ? 'border-red-500/30 bg-red-500/8 hover:bg-red-500/15' : 'border-yellow-500/30 bg-yellow-500/8 hover:bg-yellow-500/15'
-                }`}
-                  onClick={() => {
-                    if (onNodeNavigate) onNodeNavigate(p.entryPoint);
-                  }}
-                >
-                  <div className="font-mono text-xs font-medium text-white truncate">{p.entryPoint.label}</div>
-                  <div className="text-[10px] text-muted mt-0.5">
-                    {p.affectedInPath.length} affected node(s) along path
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* 4e. LLM analysis text */}
-          <div className="mx-3 mt-4 mb-2">
-            <div className="text-[10px] font-mono text-muted uppercase tracking-wider mb-2">AI Impact Analysis</div>
-            <div className="bg-surface border border-border rounded-xl px-3 py-3 font-sans text-xs text-white/80 leading-relaxed whitespace-pre-wrap min-h-[100px]">
-              {renderLLMText(llmResponse)}
-              {isLoadingLLM && (
-                <span className="inline-block w-1.5 h-3 bg-white/70 ml-1 animate-pulse align-middle" />
+      {resultVisible && blastResult && (
+        <div className="flex flex-col gap-5 border-t border-cg-border pt-5">
+          {!offline && (
+            <p className="flex items-center gap-2 text-cg-sm" aria-live="polite">
+              {riskLevel ? (
+                <>
+                  <span aria-hidden="true" className={cn('h-2 w-2 rounded-full', (RISK[riskLevel] ?? RISK.DANGEROUS)[0])} />
+                  <span className="font-medium text-cg-text">{(RISK[riskLevel] ?? [null, riskLevel])[1]}</span>
+                  <span className="text-cg-secondary">· {(RISK[riskLevel] ?? [null, null, ''])[2]}</span>
+                </>
+              ) : (
+                <span className="text-cg-tertiary">Assessing risk…</span>
               )}
+            </p>
+          )}
+
+          <dl className="grid grid-cols-3 gap-3">
+            {[
+              ['Affected', blastResult.stats.total],
+              ['Direct', blastResult.stats.bySeverity.critical || 0],
+              ['Pipelines', brokenPipelines.length],
+            ].map(([label, value]) => (
+              <div key={label}>
+                <dt className="text-cg-xs text-cg-tertiary">{label}</dt>
+                <dd className="text-cg-xl tabular-nums text-cg-text">{value}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <section>
+            <h3 className={sectionTitle}>Impact cascade</h3>
+            <div className="mt-2 flex flex-col">
+              <p className="truncate text-cg-sm font-medium text-cg-text">{selectedNode.label}</p>
+              {affectedBy('critical').slice(0, 4).map(([id]) => (
+                <AffectedRow key={id} id={id} depth={1} />
+              ))}
+              {affectedBy('critical').length > 4 && (
+                <p className="pl-8 text-cg-xs text-cg-tertiary">+ {affectedBy('critical').length - 4} more direct dependents</p>
+              )}
+              {affectedBy('high').slice(0, 3).map(([id]) => (
+                <AffectedRow key={id} id={id} depth={2} />
+              ))}
+              {affectedBy('high').length > 3 && (
+                <p className="pl-11 text-cg-xs text-cg-tertiary">+ {affectedBy('high').length - 3} more at the second level</p>
+              )}
+              {(() => {
+                const deeper = [...blastResult.affected.values()].filter((d) => d.depth >= 3).length;
+                return deeper ? <p className="pl-11 text-cg-xs text-cg-tertiary">{deeper} more transitive dependents</p> : null;
+              })()}
+            </div>
+          </section>
+
+          {brokenPipelines.length > 0 && (
+            <section>
+              <h3 className={sectionTitle}>Pipelines at risk</h3>
+              <ul className="mt-2 flex flex-col">
+                {brokenPipelines.map((p, i) => (
+                  <li key={i}>
+                    <button
+                      type="button"
+                      onClick={() => onNodeNavigate?.(p.entryPoint)}
+                      className={cn('flex w-full items-center gap-2 rounded py-1.5 text-left hover:bg-cg-hover [@media(pointer:coarse)]:min-h-11', focusRing)}
+                    >
+                      <span aria-hidden="true" className={cn('h-1.5 w-1.5 shrink-0 rounded-full', p.risk === 'high' ? 'bg-cg-sev-high' : 'bg-cg-sev-med')} />
+                      <span className="min-w-0 flex-1 truncate text-cg-sm text-cg-text">{p.entryPoint.label}</span>
+                      <span className="shrink-0 text-cg-xs text-cg-tertiary">{p.affectedInPath.length} affected</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <section>
+            <h3 className={sectionTitle}>AI impact analysis</h3>
+            <div className="mt-2 whitespace-pre-wrap rounded-cg-control border border-cg-border bg-cg-canvas p-3 text-cg-sm text-cg-secondary">
+              {llmResponse ? renderLLMText(llmResponse) : isLoadingLLM ? <span className="text-cg-tertiary">Writing the analysis…</span> : null}
               <div ref={responseEndRef} />
             </div>
-          </div>
+          </section>
 
-          {/* 4f. Action buttons */}
-          <div className="mx-3 mt-4 mb-6 space-y-2">
-            <button
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
               onClick={() => {
-                // Focus the first critical node in inspector if possible, or source node
-                const firstCrit = [...blastResult.affected.entries()].find(([_, d]) => d.severity === 'critical')?.[0];
-                const targetNode = graph?.nodes?.find(n => n.id === (firstCrit || selectedNode.id));
-                if (targetNode && onNodeNavigate) onNodeNavigate(targetNode);
+                const firstCritical = affectedBy('critical')[0]?.[0];
+                const target = nodeById(firstCritical || selectedNode.id);
+                if (target) onNodeNavigate?.(target);
               }}
-              className="w-full bg-surface border border-border hover:bg-surface-hover rounded-lg py-2 font-mono text-xs text-white text-center transition-colors"
             >
               View affected code
-            </button>
-            <button
-              onClick={handleExitSimulation}
-              className="w-full text-muted hover:text-white font-mono text-[10px] uppercase tracking-wider text-center py-2 transition-colors"
-            >
-              Exit simulation ×
-            </button>
+            </Button>
+            <Button size="sm" variant="ghost" onClick={exitSimulation}>
+              Exit simulation
+            </Button>
           </div>
         </div>
       )}
