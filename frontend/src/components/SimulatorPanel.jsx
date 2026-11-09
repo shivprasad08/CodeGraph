@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { CornerDownRight, X, Zap } from 'lucide-react';
-import { streamImpactAnalysis } from '../api';
+import { API_ERROR, streamImpactAnalysis } from '../api';
 import { computeBlastRadius, detectBrokenPipelines } from '../utils/blastRadius';
 import { cn } from '../lib/cn';
 import { Badge, Button, IconButton, Input, focusRing } from '../ui';
 import { TYPE_DOT, typeKey } from './app/NodeDetails';
+import { InlineError, RecoveryNotice } from './app/RecoveryStatus';
 
 const RISK = {
   SAFE: ['bg-cg-success', 'Safe', 'Change appears low-risk'],
@@ -26,6 +27,8 @@ export default function SimulatorPanel({
   onNodeNavigate,
   simulationSourceFile,
   offline = false, // static demo: blast radius runs locally, AI analysis needs the backend
+  onRerun,
+  onReloadGraph,
 }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
@@ -34,6 +37,9 @@ export default function SimulatorPanel({
   const [isLoadingLLM, setIsLoadingLLM] = useState(false);
   const [llmResponse, setLLMResponse] = useState('');
   const [riskLevel, setRiskLevel] = useState(null);
+  const [llmError, setLLMError] = useState(null); // ApiError: friendly message + code
+  const [recovering, setRecovering] = useState(false);
+  const [changedJobId, setChangedJobId] = useState(null);
   const [blastResult, setBlastResult] = useState(null);
   const [brokenPipelines, setBrokenPipelines] = useState([]);
   const responseEndRef = useRef(null);
@@ -74,6 +80,7 @@ export default function SimulatorPanel({
     if (!selectedNode || !graph) return;
     setLLMResponse('');
     setRiskLevel(null);
+    setLLMError(null);
 
     const blast = computeBlastRadius(graph, [selectedNode.id]);
     const pipelines = detectBrokenPipelines(graph, new Set(blast.affected.keys()));
@@ -103,9 +110,17 @@ export default function SimulatorPanel({
         setRiskLevel(level);
         setIsLoadingLLM(false);
       },
-      (err) => {
-        setLLMResponse((prev) => `${prev}${prev ? '\n\n' : ''}The AI analysis didn't finish (${err}). Try again in a minute.`);
+      (message, apiError) => {
+        setLLMError({ message, code: apiError?.code });
+        setRecovering(false);
         setIsLoadingLLM(false);
+      },
+      {
+        onRecovering: () => setRecovering(true),
+        onRecovered: ({ changed, jobId }) => {
+          setRecovering(false);
+          if (changed) setChangedJobId(jobId);
+        },
       },
     );
   };
@@ -314,10 +329,25 @@ export default function SimulatorPanel({
 
           <section>
             <h3 className={sectionTitle}>AI impact analysis</h3>
-            <div className="mt-2 whitespace-pre-wrap rounded-cg-control border border-cg-border bg-cg-canvas p-3 text-cg-sm text-cg-secondary">
-              {llmResponse ? renderLLMText(llmResponse) : isLoadingLLM ? <span className="text-cg-tertiary">Writing the analysis…</span> : null}
-              <div ref={responseEndRef} />
-            </div>
+            {changedJobId && (
+              <RecoveryNotice className="mt-2" onReloadGraph={onReloadGraph ? () => onReloadGraph(changedJobId) : undefined} />
+            )}
+            {llmError ? (
+              <InlineError
+                className="mt-2"
+                message={llmError.message}
+                onRerun={llmError.code === API_ERROR.CACHE_MISS ? onRerun : undefined}
+              />
+            ) : (
+              <div className="mt-2 whitespace-pre-wrap rounded-cg-control border border-cg-border bg-cg-canvas p-3 text-cg-sm text-cg-secondary">
+                {llmResponse ? (
+                  renderLLMText(llmResponse)
+                ) : isLoadingLLM ? (
+                  <span className="text-cg-tertiary">{recovering ? 'Reloading this analysis on the server…' : 'Writing the analysis…'}</span>
+                ) : null}
+                <div ref={responseEndRef} />
+              </div>
+            )}
           </section>
 
           <div className="flex flex-wrap gap-2">

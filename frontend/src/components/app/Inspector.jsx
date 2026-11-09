@@ -33,6 +33,8 @@ export default function Inspector({
   onBlastRadiusChange,
   onSimulationModeChange,
   onAnalyzeOwn,
+  onRerun,
+  onReloadGraph,
 }) {
   return (
     <Tabs value={tab} onValueChange={onTabChange} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-cg-raised font-cg-sans">
@@ -58,7 +60,7 @@ export default function Inspector({
         />
       </TabsContent>
       <TabsContent forceMount value="chat" className="relative min-h-0 flex-1 overflow-hidden pt-0 data-[state=inactive]:hidden">
-        <ChatSidebar graph={graph} offline={offline} onNodeSelect={onSelectNode} onNodeHighlight={onNodeHighlight} onAnalyzeOwn={onAnalyzeOwn} />
+        <ChatSidebar graph={graph} offline={offline} onNodeSelect={onSelectNode} onNodeHighlight={onNodeHighlight} onAnalyzeOwn={onAnalyzeOwn} onRerun={onRerun} onReloadGraph={onReloadGraph} />
       </TabsContent>
       <TabsContent forceMount value="health" className="relative min-h-0 flex-1 overflow-y-auto pt-0 data-[state=inactive]:hidden">
         <HealthPanel analysis={analysis} graph={graph} isLoading={analysisLoading} onNodeSelect={onSelectNode} onViewSource={onViewSource} />
@@ -72,6 +74,8 @@ export default function Inspector({
           onSimulationModeChange={onSimulationModeChange}
           onNodeHighlight={onNodeHighlight}
           onNodeNavigate={onSelectNode}
+          onRerun={onRerun}
+          onReloadGraph={onReloadGraph}
         />
       </TabsContent>
     </Tabs>

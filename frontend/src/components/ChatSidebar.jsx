@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Copy, Download, MessageSquare, RotateCcw, Square } from 'lucide-react';
-import { streamChatMessage, fetchChatSuggestions } from '../api';
+import { API_ERROR, streamChatMessage, fetchChatSuggestions } from '../api';
 import { cn } from '../lib/cn';
 import { Button, IconButton, focusRing } from '../ui';
 import ChatMarkdown, { stripReferences } from './app/ChatMarkdown';
+import { InlineError, RecoveryNotice } from './app/RecoveryStatus';
 
 const MESSAGE_LIMIT = 20;
 
@@ -12,13 +13,16 @@ const MESSAGE_LIMIT = 20;
  * with Markdown, and node references select + zoom the node.
  * In offline (/demo) mode it shows an empty state instead.
  */
-export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNodeHighlight, onAnalyzeOwn }) {
+export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNodeHighlight, onAnalyzeOwn, onRerun, onReloadGraph }) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isWaiting, setIsWaiting] = useState(false); // sent, no token yet
   const [isStreaming, setIsStreaming] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
   const [messageCount, setMessageCount] = useState(0);
+  // Server cache was wiped: reloading the analysis, and whether the commit moved on
+  const [recovering, setRecovering] = useState(false);
+  const [changedJobId, setChangedJobId] = useState(null);
 
   const endRef = useRef(null);
   const textareaRef = useRef(null);
@@ -80,11 +84,19 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
         updateLast((m) => ({ ...m, nodes: refs, content: m.content || 'Stopped.' }));
         if (refs.length) onNodeHighlight?.(refs);
       },
-      (error) => {
+      (message, apiError) => {
         setIsWaiting(false);
         setIsStreaming(false);
+        setRecovering(false);
         abortRef.current = null;
-        updateLast((m) => ({ ...m, error: true, content: `${(error || 'The answer did not arrive').replace(/\.\s*$/, '')}. Try again in a minute.` }));
+        updateLast((m) => ({ ...m, error: true, errorCode: apiError?.code, content: message }));
+      },
+      {
+        onRecovering: () => setRecovering(true),
+        onRecovered: ({ changed, jobId }) => {
+          setRecovering(false);
+          if (changed) setChangedJobId(jobId);
+        },
       },
     );
   };
@@ -137,6 +149,9 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
       )}
 
       <div className="relative min-h-0 flex-1 overflow-y-auto px-4 py-4" aria-live="polite" aria-busy={busy}>
+        {changedJobId && (
+          <RecoveryNotice className="mb-4" onReloadGraph={onReloadGraph ? () => onReloadGraph(changedJobId) : undefined} />
+        )}
         {messages.length === 0 ? (
           <div className="flex flex-col gap-4">
             <div>
@@ -175,9 +190,9 @@ export default function ChatSidebar({ graph, offline = false, onNodeSelect, onNo
               ) : (
                 <div key={m.id} className="group text-cg-sm text-cg-secondary">
                   {m.content === '' && isWaiting && idx === messages.length - 1 ? (
-                    <p className="text-cg-tertiary">Thinking…</p>
+                    <p className="text-cg-tertiary">{recovering ? 'Reloading this analysis on the server…' : 'Thinking…'}</p>
                   ) : m.error ? (
-                    <p className="text-cg-sev-high">{m.content}</p>
+                    <InlineError message={m.content} onRerun={m.errorCode === API_ERROR.CACHE_MISS ? onRerun : undefined} />
                   ) : (
                     <ChatMarkdown text={m.content} nodeIds={nodeIds} onNode={selectNodeById} />
                   )}

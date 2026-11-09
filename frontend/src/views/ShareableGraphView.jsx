@@ -325,6 +325,9 @@ export default function ShareableGraphView({ staticData = null } = {}) {
     }
   };
 
+  // A recovered analysis landed on a newer commit: open that finished job
+  const reloadGraph = (newJobId) => navigate(`/graph/${owner}/${repo}/jobs/${newJobId}`);
+
   // ---- Keyboard ---------------------------------------------------------------
   const stateRef = useRef({});
   stateRef.current = { simulationMode, code, selectedNode, selectedFilePath, paletteOpen, filesSheet, inspectorSheet };
@@ -471,6 +474,8 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       onBlastRadiusChange={setBlastRadius}
       onSimulationModeChange={setSimulationMode}
       onAnalyzeOwn={() => navigate('/')}
+      onRerun={offline ? undefined : rerun}
+      onReloadGraph={offline ? undefined : reloadGraph}
     />
   );
 
@@ -548,6 +553,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
             repo={`${owner}/${repo}`}
             commitSha={graphData?.commit_sha}
             offline={offline}
+            onRerun={offline ? undefined : rerun}
           />
         )}
       </div>

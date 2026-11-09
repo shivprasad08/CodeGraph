@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import hljs from 'highlight.js/lib/core';
 import python from 'highlight.js/lib/languages/python';
-import { ExternalLink, FileCode2, TriangleAlert, X } from 'lucide-react';
-import { fetchFileSource } from '../api';
+import { ExternalLink, FileCode2, X } from 'lucide-react';
+import { API_ERROR, fetchFileSource } from '../api';
 import { cn } from '../lib/cn';
 import { IconButton } from '../ui';
+import { InlineError } from './app/RecoveryStatus';
 
 hljs.registerLanguage('python', python);
 
@@ -32,11 +33,13 @@ export default function CodeInspector({
   commitSha,
   offline = false, // static demo: no backend, so no source fetch
   focusLine,
+  onRerun,
 }) {
   const [inspectorHeight, setInspectorHeight] = useState(() => Math.floor(window.innerHeight * 0.45));
   const [isResizing, setIsResizing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(null); // ApiError: friendly message + code
+  const [recovering, setRecovering] = useState(false);
   const [sourceCode, setSourceCode] = useState('');
 
   const lineNumbersRef = useRef(null);
@@ -71,12 +74,18 @@ export default function CodeInspector({
       setError(null);
       setSourceCode('');
       try {
-        const res = await fetchFileSource(repo, commitSha, filePath);
+        const res = await fetchFileSource(repo, commitSha, filePath, {
+          onRecovering: () => isMounted && setRecovering(true),
+          onRecovered: () => isMounted && setRecovering(false),
+        });
         if (isMounted) setSourceCode(res.content || '');
       } catch (err) {
-        if (isMounted) setError(err.message);
+        if (isMounted) setError(err);
       } finally {
-        if (isMounted) setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+          setRecovering(false);
+        }
       }
     })();
     return () => {
@@ -242,6 +251,11 @@ export default function CodeInspector({
 
       {!offline && isLoading && (
         <div className="flex flex-1 flex-col gap-2 overflow-hidden p-4" aria-busy="true" aria-label="Loading source">
+          {recovering && (
+            <p role="status" className="mb-1 text-cg-xs text-cg-tertiary">
+              Reloading this analysis on the server…
+            </p>
+          )}
           {[72, 48, 88, 60, 30, 80, 54, 66].map((w, i) => (
             <div key={i} className="h-3 rounded bg-cg-hover" style={{ width: `${w}%` }} />
           ))}
@@ -249,10 +263,12 @@ export default function CodeInspector({
       )}
 
       {!offline && error && !isLoading && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1 p-6 text-center">
-          <TriangleAlert size={24} strokeWidth={1.5} aria-hidden="true" className="text-cg-tertiary" />
-          <p className="mt-2 text-cg-sm text-cg-text">Couldn&apos;t load {parts.at(-1)}</p>
-          <p className="max-w-xs text-cg-xs text-cg-secondary">Source files are kept for the session only. Re-run the analysis to load them again.</p>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <InlineError
+            className="max-w-sm"
+            message={`Couldn't load ${parts.at(-1)}. ${error.message ?? ''}`.trim()}
+            onRerun={error.code === API_ERROR.CACHE_MISS ? onRerun : undefined}
+          />
         </div>
       )}
 
