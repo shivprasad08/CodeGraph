@@ -113,13 +113,21 @@ class TestCallResolution:
         assert ("app/service.py::direct", "app/storage.py::Store.__init__", "exact") in c
         assert ("app/service.py::direct", "app/storage.py::Store.get", "exact") in c
 
-    def test_unknown_receiver_get_is_not_linked_but_unique_name_is_inferred(self):
+    def test_local_variable_type_resolves_exactly_even_for_generic_names(self):
         g = build(self.FILES)
         c = calls(g)
-        # s = Store(); s.get() → unknown receiver; "get" is generic → no edge
-        assert not any(s == "app/service.py::via_variable" and t.endswith("Store.get") for s, t, _ in c)
-        # s.snapshot_all() → unknown receiver, but exactly one snapshot_all in the repo → inferred
-        assert ("app/service.py::via_variable", "app/storage.py::Store.snapshot_all", "inferred") in c
+        # s = Store(); s.get() → typed local; the generic-name stoplist does not apply
+        assert ("app/service.py::via_variable", "app/storage.py::Store.get", "exact") in c
+        assert ("app/service.py::via_variable", "app/storage.py::Store.snapshot_all", "exact") in c
+
+    def test_unknown_receiver_unique_name_is_inferred_generic_name_is_not(self):
+        g = build({
+            "store.py": "class Store:\n    def get(self):\n        pass\n    def snapshot_all(self):\n        pass\n",
+            "use.py": "def go(s):\n    s.get()\n    s.snapshot_all()\n",
+        })
+        c = calls(g)
+        assert ("use.py::go", "store.py::Store.snapshot_all", "inferred") in c
+        assert not any(t == "store.py::Store.get" for _, t, _ in c)
 
     def test_dict_get_and_stdlib_create_no_edges(self):
         g = build(self.FILES)
@@ -175,6 +183,118 @@ class TestCallResolution:
                 Tools.build()
         """})
         assert ("m.py::use", "m.py::Tools.build", "exact") in calls(g)
+
+
+class TestTypeInference:
+    FILES = {
+        "kv/__init__.py": "",
+        "kv/storage.py": """
+            class Storage:
+                def get(self, key):
+                    return None
+                def put(self, key, value):
+                    pass
+
+            class FastStorage(Storage):
+                pass
+        """,
+    }
+
+    def test_self_attribute_assigned_in_init(self):
+        g = build({**self.FILES, "kv/server.py": """
+            from .storage import Storage
+
+            class Server:
+                def __init__(self):
+                    self._store = None
+                    self._store = Storage()
+
+                def handle(self, key):
+                    return self._store.get(key)
+        """})
+        assert ("kv/server.py::Server.handle", "kv/storage.py::Storage.get", "exact") in calls(g)
+
+    def test_annotated_init_param_and_class_annotation_and_base_class_method(self):
+        g = build({**self.FILES, "kv/server.py": """
+            from kv.storage import Storage, FastStorage
+
+            class Server:
+                cache: FastStorage
+
+                def __init__(self, store: Storage):
+                    self.store = store
+
+                def read(self, key):
+                    self.cache.get(key)
+                    return self.store.get(key)
+        """})
+        c = calls(g)
+        assert ("kv/server.py::Server.read", "kv/storage.py::Storage.get", "exact") in c
+        # FastStorage has no get of its own → found on its base (MRO)
+        assert {t for s, t, _ in c if s == "kv/server.py::Server.read"} == {"kv/storage.py::Storage.get"}
+
+    def test_annotated_param_and_local_variable(self):
+        g = build({**self.FILES, "kv/ops.py": """
+            from typing import Optional
+            from kv import storage
+
+            def copy(src: Optional["storage.Storage"], key):
+                dst = storage.Storage()
+                dst.put(key, src.get(key))
+        """})
+        c = calls(g)
+        assert ("kv/ops.py::copy", "kv/storage.py::Storage.get", "exact") in c
+        assert ("kv/ops.py::copy", "kv/storage.py::Storage.put", "exact") in c
+
+    def test_attribute_typed_in_base_class_resolves_in_subclass(self):
+        g = build({**self.FILES, "kv/base.py": """
+            from .storage import Storage
+
+            class Base:
+                def __init__(self):
+                    self.store = Storage()
+
+            class Child(Base):
+                def run(self):
+                    self.store.put(1, 2)
+        """})
+        assert ("kv/base.py::Child.run", "kv/storage.py::Storage.put", "exact") in calls(g)
+
+    def test_unresolvable_or_ambiguous_types_make_no_edge(self):
+        g = build({**self.FILES, "kv/misc.py": """
+            import collections
+            from .storage import Storage
+
+            class Holder:
+                def __init__(self, flag):
+                    self.data = collections.OrderedDict()
+                    self.mixed = Storage() if flag else {}
+
+                def go(self):
+                    self.data.get(1)
+                    self.mixed.get(1)
+
+            def local():
+                d = dict()
+                d.get(1)
+        """})
+        sources = {s for s, _ in call_pairs(g)}
+        assert "kv/misc.py::Holder.go" not in sources
+        assert "kv/misc.py::local" not in sources
+
+
+class TestDocs:
+    def test_module_and_class_docs_on_nodes(self):
+        g = build({"m.py": '''
+            # header comment
+            """Bully election and
+            Chang–Roberts ring election."""
+
+            class Gate:
+                """Admits writes only with a quorum."""
+        '''})
+        assert node(g, "m.py")["doc"] == "Bully election and Chang–Roberts ring election."
+        assert node(g, "m.py::Gate")["doc"] == "Admits writes only with a quorum."
 
 
 class TestImports:

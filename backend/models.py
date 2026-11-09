@@ -2,7 +2,7 @@
 # Module: Setup
 
 from pydantic import BaseModel
-from typing import Literal, List
+from typing import Literal, List, Optional
 
 class AnalyzeRequest(BaseModel):
     repo_url: str
@@ -31,6 +31,8 @@ class GraphResponse(BaseModel):
     commit_sha: str
     nodes: List[GraphNode]
     edges: List[GraphEdge]
+    schema_version: Optional[int] = None
+    architecture: Optional[dict] = None  # modules, edges, method, hidden (architecture.py)
 
 class ImpactRequest(BaseModel):
     source_node_id: str

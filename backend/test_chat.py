@@ -93,6 +93,71 @@ class TestBuildSystemPrompt:
         prompt = chat.build_system_prompt("o/r", graph)
         assert "def A.get" in prompt and "def B.get" in prompt
 
+    def test_about_lines_class_docs_and_algorithm_rule(self):
+        graph = {"repo": "o/r", "nodes": [
+            {"id": "election.py", "type": "file", "label": "election.py",
+             "doc": "Bully-based leader election for mini-redis. The project uses the Bully algorithm rather than Raft."},
+            {"id": "mutex.py", "type": "file", "label": "mutex.py",
+             "doc": "Mutex managers for M16: 1. RicartAgrawalaManager — distributed mutual exclusion 2. CentralizedLockManager — baseline"},
+            {"id": "plain.py", "type": "file", "label": "plain.py"},
+            {"id": "election.py::Bully", "type": "class", "label": "Bully", "qualified_name": "Bully", "file": "election.py",
+             "doc": "Runs Bully elections. Highest id wins."},
+            {"id": "election.py::Ring", "type": "class", "label": "Ring", "qualified_name": "Ring", "file": "election.py",
+             "doc": "Ignored when a summary exists.", "summary": "Chang–Roberts ring election."},
+        ], "edges": []}
+        prompt = chat.build_system_prompt("o/r", graph)
+        assert "  election.py\n    about: Bully-based leader election for mini-redis." in prompt
+        # A short first sentence ending in a numbered list is extended, not cut at "1."
+        assert "about: Mutex managers for M16: 1. RicartAgrawalaManager — distributed mutual exclusion" in prompt
+        assert "  plain.py\n" in prompt and "plain.py\n    about:" not in prompt
+        assert "class Bully — Runs Bully elections." in prompt
+        assert "class Ring — Chang–Roberts ring election." in prompt
+        assert "Never guess an" in prompt and "Ricart–Agrawala" in prompt
+
+    def test_call_relationships_capped_per_target(self):
+        nodes = [{"id": "c.py", "type": "file", "label": "c.py"}, {"id": "c.py::tick", "type": "function", "label": "tick", "file": "c.py"}]
+        edges = []
+        for i in range(10):
+            nodes.append({"id": f"m{i}.py::f", "type": "function", "label": "f", "file": f"m{i}.py"})
+            edges.append({"source": f"m{i}.py::f", "target": "c.py::tick", "type": "calls"})
+        prompt = chat.build_system_prompt("o/r", {"repo": "o/r", "nodes": nodes, "edges": edges})
+        assert prompt.count("→ c.py::tick") == chat.MAX_EDGES_PER_TARGET
+
+    def test_first_sentence_capped(self):
+        assert chat._first_sentence("word " * 100).endswith("…")
+        assert len(chat._first_sentence("word " * 100)) <= chat.MAX_ABOUT_CHARS
+        assert chat._first_sentence("") == ""
+
+    def test_trimming_drops_function_lines_before_docs(self):
+        graph = _big_graph(n_files=30, n_funcs=10)
+        for n in graph["nodes"]:
+            if n["type"] == "file":
+                n["doc"] = f"Documentation for {n['id']} describing the algorithm it implements in detail."
+        prompt = chat.build_system_prompt("owner/repo", graph)
+        assert len(prompt) <= chat.MAX_PROMPT_CHARS
+        # Every file keeps its about: line; function lines were dropped to make room
+        assert prompt.count("    about: Documentation for") == 30
+        assert prompt.count("    def ") < 30 * 8
+        assert "...and" in prompt
+        # The best-connected function survives longest
+        assert "def function_with_long_name_00" in prompt
+
+    def test_trimming_drops_undocumented_files_before_about_lines(self):
+        graph = _big_graph(n_files=60, n_funcs=10)
+        for n in graph["nodes"]:
+            if n["type"] == "file" and int(n["id"][-5:-3]) % 2 == 0:
+                n["doc"] = "Documented module. " + "x" * 120
+        prompt = chat.build_system_prompt("owner/repo", graph)
+        assert len(prompt) <= chat.MAX_PROMPT_CHARS
+        # Only each file's best-connected definition is left of the function lines
+        defs = [line for line in prompt.splitlines() if line.startswith("    def ")]
+        assert all("function_with_long_name_00 " in line for line in defs)
+        documented = [f"module_{i:02d}.py" for i in range(0, 60, 2)]
+        undocumented = [f"module_{i:02d}.py" for i in range(1, 60, 2)]
+        assert sum(f in prompt for f in undocumented) < len(undocumented)
+        assert all(f in prompt for f in documented)
+        assert "more files (omitted for length)" in prompt
+
     def test_qualified_method_ids_are_referenced(self):
         graph = {"nodes": [{"id": "src/store.py::Store.get"}]}
         text = "It reads via `src/store.py::Store.get`.\nNODE: src/store.py::Store.get\n"

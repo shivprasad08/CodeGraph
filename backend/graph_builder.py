@@ -4,7 +4,8 @@
 # Calls are resolved through each file's scope (local definitions, imports, the
 # enclosing class and its bases) instead of by bare name, so `x.get()` no longer
 # links to every function called `get`. Each call edge carries a confidence:
-#   exact     resolved through scope
+#   exact     resolved through scope, or through a known receiver type
+#             (self.x = Foo() → self.x.m(); v = Foo() / v: Foo → v.m())
 #   inferred  unknown receiver, but exactly one non-generic function/method has that name
 
 import posixpath
@@ -13,7 +14,7 @@ from collections import OrderedDict
 import networkx as nx
 
 # Bump when node ids or edge semantics change; part of the cache key so old graphs are not reused
-GRAPH_SCHEMA_VERSION = 2
+GRAPH_SCHEMA_VERSION = 3
 
 # Method names too common to infer from an unknown receiver (dict.get, list.append, file.close…)
 GENERIC_METHOD_STOPLIST = frozenset({
@@ -140,6 +141,8 @@ class _Builder:
                 "id": path, "label": path, "type": "file", "file": path,
                 "summary": "", "lines": [], "centrality": 0.0, "is_entry_point": False,
             }
+            if f.get("doc"):
+                self.nodes[path]["doc"] = f["doc"]
             symbols = {}
             for cls in f.get("classes", []):
                 cid = cls["id"]
@@ -149,7 +152,12 @@ class _Builder:
                     "summary": "", "lines": [cls["start_line"], cls["end_line"]],
                     "centrality": 0.0, "is_entry_point": False,
                 }
-                self.classes[cid] = {"file": path, "bases": cls.get("base_classes", []), "methods": {}}
+                if cls.get("doc"):
+                    self.nodes[cid]["doc"] = cls["doc"]
+                self.classes[cid] = {
+                    "file": path, "bases": cls.get("base_classes", []), "methods": {},
+                    "attr_types": cls.get("attr_types", {}),
+                }
                 self.add_edge(path, cid, "defines")
                 if not cls.get("is_nested") and "." not in cls.get("qualified_name", cls["name"]):
                     symbols[cls["name"]] = cid
@@ -319,6 +327,43 @@ class _Builder:
                     return found
         return None
 
+    def attr_class(self, class_id, attr, seen=None):
+        """Repo class of `self.<attr>`, from the class's (or a base's) type facts."""
+        seen = seen if seen is not None else set()
+        if class_id in seen or class_id not in self.classes:
+            return None
+        seen.add(class_id)
+        info = self.classes[class_id]
+        type_name = info["attr_types"].get(attr)
+        if type_name:
+            return self.resolve_class(info["file"], type_name)
+        for base_id in self.base_classes(class_id):
+            found = self.attr_class(base_id, attr, seen)
+            if found:
+                return found
+        return None
+
+    def local_class(self, caller, name):
+        """Repo class of local/param `name` in the caller (or an enclosing function, for closures)."""
+        fid = caller
+        while fid in self.functions:
+            fn = self.functions[fid]
+            type_name = fn.get("local_types", {}).get(name) or fn.get("param_types", {}).get(name)
+            if type_name:
+                return self.resolve_class(fn["file"], type_name)
+            if name in fn.get("local_types", {}) or name in fn.get("parameters", []):
+                return None  # bound here, type unknown: don't look further out
+            parent, _, _ = fid.rpartition(".")
+            if "::" not in parent:
+                return None
+            fid = parent
+        return None
+
+    def _typed_method_edge(self, caller, class_id, method):
+        """Typed receiver: method on the class or its bases. The stoplist never applies here."""
+        target = self.find_method(class_id, method)
+        return self.add_edge(caller, target, "calls") if target else False
+
     def base_classes(self, class_id):
         info = self.classes.get(class_id)
         if not info:
@@ -394,6 +439,12 @@ class _Builder:
             method = self.find_method(cls, target["attr"]) if cls in self.classes else None
             return self.add_edge(caller, method, "calls") if method else False
 
+        if kind == "self_attr":
+            typed = self.attr_class(cls, target["name"]) if cls in self.classes else None
+            if typed:
+                return self._typed_method_edge(caller, typed, target["attr"])
+            return self._inferred(caller, target["attr"])
+
         if kind == "super":
             for base in self.base_classes(cls):
                 method = self.find_method(base, target["attr"])
@@ -404,6 +455,10 @@ class _Builder:
         if kind in ("dotted", "instance"):
             base_text = target["base"] if kind == "dotted" else target["ctor"]
             parts = base_text.split(".")
+            if kind == "dotted" and len(parts) == 1:
+                typed = self.local_class(caller, parts[0])  # v = Foo(); v.m()  /  def f(v: Foo): v.m()
+                if typed:
+                    return self._typed_method_edge(caller, typed, target["attr"])
             found = self.resolve_chain(path, parts)
             if found and found[0] == "external":
                 return False  # third-party / stdlib (json.loads, jwt.decode…)

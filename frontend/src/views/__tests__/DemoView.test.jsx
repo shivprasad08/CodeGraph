@@ -79,7 +79,22 @@ import DemoView from '../DemoView';
 import { DEMO_DATA_URL } from '../../lib/demo';
 
 // jsdom tests run with cwd = frontend/ (import.meta.url is not a file: URL here)
-const demo = JSON.parse(readFileSync(resolve(process.cwd(), 'public/demo/mini_redis.json'), 'utf8'));
+const demoFile = JSON.parse(readFileSync(resolve(process.cwd(), 'public/demo/mini_redis.json'), 'utf8'));
+
+// Module grouping as the backend stores it (graph.architecture). Supplied here so the test
+// does not depend on whether the committed demo JSON was generated before or after it existed.
+const demoFiles = demoFile.nodes.filter((n) => n.type === 'file').map((n) => n.id);
+const inDir = (dir) => demoFiles.filter((f) => f.startsWith(dir));
+const architecture = {
+  method: 'directories',
+  modules: [
+    { id: 'mod:election', label: 'election', files: inDir('src/miniredis/election/'), function_count: 40, class_count: 4, has_entry_points: false },
+    { id: 'mod:replication', label: 'replication', files: inDir('src/miniredis/replication/'), function_count: 60, class_count: 6, has_entry_points: false },
+  ],
+  edges: [{ source: 'mod:election', target: 'mod:replication', calls: 5, imports: 1, weight: 6 }],
+  hidden: inDir('scripts/'),
+};
+let demo = { ...demoFile, architecture };
 
 beforeAll(() => {
   // jsdom gaps used by cmdk / react-resizable-panels
@@ -92,6 +107,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  demo = { ...demoFile, architecture };
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => demo })));
 });
 
@@ -197,7 +213,7 @@ describe('/demo app view', () => {
     const diagram = await screen.findByTestId('flow-diagram');
     expect(within(diagram).getByRole('button', { name: 'election' })).toBeTruthy();
     expect(within(diagram).queryByRole('button', { name: 'scripts' })).toBeNull(); // hidden by default
-    expect(screen.getByText(/Modules computed from the code graph/)).toBeTruthy();
+    expect(screen.getByText(/Grouped by directory/)).toBeTruthy();
 
     fireEvent.click(within(diagram).getByRole('button', { name: 'election' }));
     await waitFor(() => expect(screen.queryByTestId('flow-diagram')).toBeNull());
@@ -205,6 +221,18 @@ describe('/demo app view', () => {
     expect(activeTab()).toBe('Details');
     // Details shows the module's main file
     expect(screen.getByRole('heading', { level: 2, name: (name) => name.startsWith('src/miniredis/election/') })).toBeTruthy();
+  });
+
+  it('asks for a re-run when the graph predates the architecture view', async () => {
+    demo = { ...demoFile };
+    delete demo.architecture;
+    await renderDemo();
+    const group = screen.getByRole('radiogroup', { name: 'Canvas view' });
+    fireEvent.click(within(group).getByRole('radio', { name: 'Architecture' }));
+    const heading = await screen.findByRole('heading', { name: 'Re-run analysis to see the architecture view' });
+    expect(screen.queryByTestId('flow-diagram')).toBeNull();
+    // The static demo has no backend, so the message offers no re-run button
+    expect(within(heading.parentElement).queryByRole('button')).toBeNull();
   });
 
   it('ignores single-key shortcuts while typing', async () => {

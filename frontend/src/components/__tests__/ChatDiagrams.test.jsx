@@ -61,6 +61,16 @@ const graph = {
     { source: 'src/app/api/routes.py::index', target: 'src/app/db/models.py::load', type: 'calls' },
     { source: 'src/app/api/routes.py::login', target: 'src/app/db/models.py::save', type: 'calls' },
   ],
+  architecture: {
+    method: 'directories',
+    modules: [
+      { id: 'mod:api', label: 'api', files: ['src/app/api/routes.py'], function_count: 2, class_count: 0, has_entry_points: false },
+      { id: 'mod:db', label: 'db', files: ['src/app/db/models.py'], function_count: 2, class_count: 0, has_entry_points: false },
+      { id: 'mod:node', label: 'node', files: ['src/app/node.py'], function_count: 1, class_count: 0, has_entry_points: false },
+    ],
+    edges: [{ source: 'mod:api', target: 'mod:db', calls: 2, imports: 0, weight: 2 }],
+    hidden: ['scripts/node.py'],
+  },
 };
 
 const DIAGRAM_TEXT = 'Login checks the user.\n\n```diagram\n{"nodes":[{"id":"n1","ref":"x"}]}\n```\n\nReferences:\nNODE: src/app/api/routes.py::login';

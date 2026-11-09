@@ -20,6 +20,7 @@ import ingestion
 import parser
 import graph_builder
 import enrichment
+import architecture
 import cache
 import config
 import chat
@@ -201,6 +202,12 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
             logger.error(f"Graph build failed for {repo}: {e}", exc_info=True)
             job.update({"status": "error", "error": f"Graph build failed: {str(e)}"})
             return
+
+        # 5b. Architecture modules (deterministic; cached with the graph)
+        try:
+            graph["architecture"] = architecture.build_architecture(graph)
+        except Exception as e:
+            logger.warning(f"Architecture grouping failed (non-fatal) for {repo}: {e}")
 
         # 6. Enrichment
         logger.info(f"Starting enrichment for {repo}")

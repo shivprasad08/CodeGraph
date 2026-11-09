@@ -246,3 +246,60 @@ class TestParseRepo:
         # Should parse at least the good file (bad file might be skipped or empty)
         assert result["repo"] == "test/repo"
         assert len(result["parsed_files"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Docstrings → doc fields
+# ---------------------------------------------------------------------------
+class TestDocs:
+    def test_module_doc_skips_comments_and_collapses_whitespace(self):
+        src = '#!/usr/bin/env python\n# comment\nr"""Ricart–Agrawala mutual exclusion.\n\n    Plus a centralized baseline."""\nimport os\n'
+        assert parse_file("m.py", src)["doc"] == "Ricart–Agrawala mutual exclusion. Plus a centralized baseline."
+
+    def test_module_doc_capped_at_400_chars(self):
+        src = '"""' + "word " * 200 + '"""\n'
+        assert len(parse_file("m.py", src)["doc"]) == 400
+
+    def test_class_doc_capped_at_200_chars(self):
+        src = 'class Gate:\n    """' + "x" * 300 + '"""\n'
+        cls = parse_file("m.py", src)["classes"][0]
+        assert cls["doc"] == "x" * 200
+
+    def test_missing_docstrings(self):
+        result = parse_file("m.py", "import os\n\nclass A:\n    pass\n")
+        assert result["doc"] == ""
+        assert result["classes"][0]["doc"] == ""
+
+    def test_non_string_first_statement_is_not_a_doc(self):
+        result = parse_file("m.py", 'x = 1\n"""Not a docstring."""\n\nclass A:\n    y = 2\n    """Nor this."""\n')
+        assert result["doc"] == ""
+        assert result["classes"][0]["doc"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Type facts for call resolution
+# ---------------------------------------------------------------------------
+class TestTypeFacts:
+    def test_attr_param_and_local_types(self):
+        src = (
+            "class S:\n"
+            "    cache: 'Cache'\n"
+            "    def __init__(self, store: Optional[Store], n: int = 1):\n"
+            "        self.store = store\n"
+            "        self.lock = None\n"
+            "        self.lock = threading.Lock()\n"
+            "        self.mixed = A()\n"
+            "        self.mixed = B()\n"
+            "    def run(self):\n"
+            "        v = Foo()\n"
+            "        w: Bar = make()\n"
+            "        self.store.get()\n"
+        )
+        result = parse_file("m.py", src)
+        cls = result["classes"][0]
+        assert cls["attr_types"] == {"cache": "Cache", "store": "Store", "lock": "threading.Lock"}
+        init, run = result["functions"]
+        assert init["param_types"] == {"store": "Store", "n": "int"}
+        assert run["local_types"] == {"v": "Foo", "w": "Bar"}
+        site = next(c for c in result["call_sites"] if c["callee"] == "self.store.get")
+        assert site["target"] == {"kind": "self_attr", "receiver": "self", "name": "store", "attr": "get"}

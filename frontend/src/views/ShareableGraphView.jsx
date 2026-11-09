@@ -570,7 +570,13 @@ export default function ShareableGraphView({ staticData = null } = {}) {
           className="absolute left-3 top-3 z-20"
         />
         {canvasView === 'architecture' && (
-          <ArchitectureView graph={graphData} dirColorMap={dirColorMap} onNodeClick={handleDiagramNode} />
+          <ArchitectureView
+            graph={graphData}
+            dirColorMap={dirColorMap}
+            onNodeClick={handleDiagramNode}
+            onRerun={offline ? undefined : rerun}
+            rerunning={rerunning}
+          />
         )}
 
         {!simulationMode && canvasView === 'graph' && (

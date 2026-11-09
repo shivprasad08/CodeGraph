@@ -25,6 +25,8 @@ MAX_PROMPT_CHARS = 12_000
 MAX_CHILDREN_PER_FILE = 8
 MAX_ENTRY_POINTS = 10
 MAX_CALL_EDGES = 25
+MAX_EDGES_PER_TARGET = 2
+MIN_CALL_EDGES = 10
 
 FIRST_TOKEN_TIMEOUT_S = 30
 CHAT_MAX_TOKENS = 600
@@ -38,6 +40,29 @@ def _node_degrees(edges: list[dict]) -> Counter:
         degrees[edge.get("source")] += 1
         degrees[edge.get("target")] += 1
     return degrees
+
+
+# Sentence end: . ! ? not preceded by a digit ("1." in a numbered list) and followed by a capital
+_SENTENCE_END_RE = re.compile(r"(?<!\d)[.!?](?=\s+[A-Z(`*]|$)")
+MAX_ABOUT_CHARS = 160
+MIN_SENTENCE_CHARS = 60
+
+
+def _first_sentence(text: str, limit: int = MAX_ABOUT_CHARS) -> str:
+    """
+    First sentence of a docstring, at most `limit` chars. A very short first sentence
+    ("Mutex managers for M16: ...") is extended so the useful part is not lost.
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return ""
+    m = _SENTENCE_END_RE.search(text)
+    sentence = text[: m.end()] if m else text
+    if len(sentence) < MIN_SENTENCE_CHARS:
+        sentence = text
+    if len(sentence) > limit:
+        sentence = sentence[: limit - 1].rsplit(" ", 1)[0].rstrip(",;:—-") + "…"
+    return sentence
 
 
 def build_system_prompt(job_id: str, graph: dict) -> str:
@@ -55,22 +80,30 @@ def build_system_prompt(job_id: str, graph: dict) -> str:
         if n.get("type") in ("function", "class"):
             children_by_file.setdefault(n.get("file"), []).append(n)
 
-    # File list: every file, with only its most-connected children
-    file_sections = []  # (weight, text)
+    # File list: every file, its documentation ("about:"), and its most-connected children
+    files = []  # {"path", "about", "weight", "children": [(kind, degree, line)], "total"}
     for fn in (n for n in nodes if n.get("type") == "file"):
         path = fn["id"]
         children = sorted(
             children_by_file.get(path, []), key=lambda c: -degrees[c["id"]]
         )
-        child_lines = []
+        child_items = []
         for c in children[:MAX_CHILDREN_PER_FILE]:
-            summary = f" — {c['summary']}" if c.get("summary") else ""
             prefix = "def" if c["type"] == "function" else "class"
-            child_lines.append(f"    {prefix} {c.get('qualified_name') or c['label']}{summary}")
-        if len(children) > MAX_CHILDREN_PER_FILE:
-            child_lines.append(f"    ...and {len(children) - MAX_CHILDREN_PER_FILE} more")
-        weight = degrees[path] + sum(degrees[c["id"]] for c in children)
-        file_sections.append((weight, "\n".join([f"  {path}", *child_lines])))
+            if c.get("summary"):
+                tail = f" — {c['summary']}"
+            elif c["type"] == "class" and c.get("doc"):
+                tail = f" — {_first_sentence(c['doc'])}"
+            else:
+                tail = ""
+            child_items.append((prefix, degrees[c["id"]], f"    {prefix} {c.get('qualified_name') or c['label']}{tail}"))
+        files.append({
+            "path": path,
+            "about": _first_sentence(fn.get("doc", "")),
+            "weight": degrees[path] + sum(degrees[c["id"]] for c in children),
+            "children": child_items,
+            "total": len(children),
+        })
 
     # Entry points
     entry_points = [
@@ -80,12 +113,38 @@ def build_system_prompt(job_id: str, graph: dict) -> str:
         f"  {n['id']}: {n.get('summary', '')}" for n in entry_points[:MAX_ENTRY_POINTS]
     ]
 
-    # Key relationships: call edges between the most-connected nodes
-    call_edges = sorted(
+    # Key relationships: call edges between the most-connected nodes, at most
+    # MAX_EDGES_PER_TARGET into one target (a hub like a clock's tick() would fill the list)
+    call_edges, per_target = [], Counter()
+    for e in sorted(
         (e for e in edges if e.get("type") == "calls"),
-        key=lambda e: -(degrees[e["source"]] + degrees[e["target"]]),
-    )[:MAX_CALL_EDGES]
+        key=lambda e: (-(degrees[e["source"]] + degrees[e["target"]]), e["source"], e["target"]),
+    ):
+        if per_target[e["target"]] < MAX_EDGES_PER_TARGET:
+            per_target[e["target"]] += 1
+            call_edges.append(e)
+            if len(call_edges) == MAX_CALL_EDGES:
+                break
     edge_lines = [f"  {e['source']} → {e['target']}" for e in call_edges]
+
+    # Budget trimming state: what is still shown
+    shown_children = [list(range(len(f["children"]))) for f in files]
+    shown_about = [bool(f["about"]) for f in files]
+    shown_files = [True] * len(files)
+
+    def sections() -> list[str]:
+        out = []
+        for i, f in enumerate(files):
+            if not shown_files[i]:
+                continue
+            lines = [f"  {f['path']}"]
+            if shown_about[i]:
+                lines.append(f"    about: {f['about']}")
+            lines.extend(f["children"][j][2] for j in shown_children[i])
+            if f["total"] > len(shown_children[i]):
+                lines.append(f"    ...and {f['total'] - len(shown_children[i])} more")
+            out.append("\n".join(lines))
+        return out
 
     def render(sections: list[str], omitted: int) -> str:
         structure = "\n".join(sections)
@@ -109,21 +168,24 @@ KEY CALL RELATIONSHIPS:
 RULES — follow these exactly:
 1. Only reference files, functions, and classes that exist in the structure above.
    Never invent names.
-2. When answering, cite specific node ids like `src/auth.py::verify_token`
+2. Name algorithms and protocols exactly as the file documentation ("about:") states
+   (e.g. Bully, Chang–Roberts, Ricart–Agrawala, Chandy–Lamport). Never guess an
+   algorithm from a filename. If the structure doesn't say, say you're not sure.
+3. When answering, cite specific node ids like `src/auth.py::verify_token`
    — wrap them in backticks. The frontend will make them clickable.
-3. If you're unsure which file handles something, say so and suggest
+4. If you're unsure which file handles something, say so and suggest
    the most likely candidates based on the structure.
-4. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
-5. If asked for code, you may quote short snippets but remind the user
+5. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
+6. If asked for code, you may quote short snippets but remind the user
    to check the Code Inspector for the full implementation.
-6. End every answer with a "References:" section listing the node ids
+7. End every answer with a "References:" section listing the node ids
    you explicitly mentioned, one per line, prefixed with NODE:
    Example:
    References:
    NODE: src/auth.py::verify_token
    NODE: src/auth.py::TokenVerifier
    The frontend parses these to highlight nodes on the graph.
-7. If the question is about a process, flow or sequence ("how does X work",
+8. If the question is about a process, flow or sequence ("how does X work",
    "what happens when", "flow of"), then after the prose answer and before
    References output ONE fenced block like this, with 3-10 nodes:
    ```diagram
@@ -133,15 +195,50 @@ RULES — follow these exactly:
    cannot ground the flow in real node ids, omit the block entirely.
 """
 
-    # Drop the lowest-weight file sections until the prompt fits the budget
-    kept = list(range(len(file_sections)))
-    drop_order = sorted(kept, key=lambda i: file_sections[i][0])
-    prompt = render([s for _, s in file_sections], 0)
-    while len(prompt) > MAX_PROMPT_CHARS and drop_order:
-        kept.remove(drop_order.pop(0))
-        prompt = render(
-            [file_sections[i][1] for i in kept], len(file_sections) - len(kept)
-        )
+    # Trim until the prompt fits. Documentation goes last:
+    #   1. function lines, lowest degree first (each file's best-connected definition is kept)
+    #   2. call relationships beyond the strongest MIN_CALL_EDGES
+    #   3. class lines, lowest degree first (same exception)
+    #   4. undocumented files, lowest weight first
+    #   5. each file's remaining definition   6. "about:" lines   7. the remaining files
+    def child_steps(kinds, top):
+        return [
+            ("child", i, j)
+            for _, _, i, j in sorted(
+                (c[1], f["weight"], i, j)
+                for i, f in enumerate(files)
+                for j, c in enumerate(f["children"])
+                if c[0] in kinds and (j == 0) == top
+            )
+        ]
+
+    by_weight = sorted(range(len(files)), key=lambda i: (files[i]["weight"], files[i]["path"]))
+    plan = (
+        child_steps({"def"}, top=False)
+        + [("edge", None, None)] * max(0, len(edge_lines) - MIN_CALL_EDGES)
+        + child_steps({"class"}, top=False)
+        + [("file", i, None) for i in by_weight if not files[i]["about"]]
+        + child_steps({"def", "class"}, top=True)
+        + [("about", i, None) for i in by_weight if files[i]["about"]]
+        + [("file", i, None) for i in by_weight if files[i]["about"]]
+    )
+
+    def current() -> str:
+        return render(sections(), shown_files.count(False))
+
+    prompt = current()
+    for kind, i, j in plan:
+        if len(prompt) <= MAX_PROMPT_CHARS:
+            break
+        if kind == "child":
+            shown_children[i].remove(j)
+        elif kind == "edge":
+            edge_lines.pop()
+        elif kind == "about":
+            shown_about[i] = False
+        else:
+            shown_files[i] = False
+        prompt = current()
     return prompt[:MAX_PROMPT_CHARS]
 
 

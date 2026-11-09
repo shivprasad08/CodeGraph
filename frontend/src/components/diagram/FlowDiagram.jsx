@@ -52,9 +52,10 @@ const gapBetween = (a, b) => Math.max(a.x1 - b.x2, b.x1 - a.x2, a.y1 - b.y2, b.y
  * @param {Array<{id, label, weight, labelX, labelY}>} edges
  * @param {Set<string>} wanted ids that would like a label
  * @param {Set<string>} [active] ids that beat inactive ones
+ * @param {Array<{x1,y1,x2,y2}>} [obstacles] node boxes: a label under a node would be hidden, so it is skipped
  * @returns {Set<string>} ids whose label is rendered
  */
-export function pickLabels(edges, wanted, active = new Set()) {
+export function pickLabels(edges, wanted, active = new Set(), obstacles = []) {
   const order = edges
     .filter((e) => e.label && wanted.has(e.id))
     .sort((a, b) => Number(active.has(b.id)) - Number(active.has(a.id)) || b.weight - a.weight || a.id.localeCompare(b.id));
@@ -62,6 +63,7 @@ export function pickLabels(edges, wanted, active = new Set()) {
   const shown = new Set();
   for (const e of order) {
     const box = labelBox(e.label, e.labelX, e.labelY);
+    if (obstacles.some((o) => gapBetween(o, box) < 0)) continue;
     if (placed.some((p) => gapBetween(p, box) < LABEL_GAP)) continue;
     placed.push(box);
     shown.add(e.id);
@@ -116,17 +118,25 @@ export function layoutSpec(spec) {
   const byId = new Map(spec.nodes.map((n) => [n.id, n]));
   // Handle points: bottom/top centre (TB) or right/left middle (LR). A bezier between them
   // has its t=0.5 point at the midpoint of the two, which is where React Flow puts the label.
-  const anchor = (id, out) => {
+  // `far` is the trailing side (bottom / right), `near` the leading side (top / left).
+  const anchor = (id, far) => {
     const p = positions.get(id);
     const h = heightOf(byId.get(id));
-    return vertical ? { x: p.x + NODE_W / 2, y: out ? p.y + h : p.y } : { x: out ? p.x + NODE_W : p.x, y: p.y + h / 2 };
+    return vertical ? { x: p.x + NODE_W / 2, y: far ? p.y + h : p.y } : { x: far ? p.x + NODE_W : p.x, y: p.y + h / 2 };
+  };
+  // Back edge: the target sits before the source (above it in TB). It leaves the source's
+  // leading side and enters the target's trailing side, instead of looping around both nodes.
+  const isBack = (e) => {
+    const a = positions.get(e.source);
+    const b = positions.get(e.target);
+    return vertical ? b.y < a.y : b.x < a.x;
   };
 
   // Cluster dots: one palette slot per distinct cluster, same palette and assignment as the graph view
   const clusterKeys = [...new Set(spec.nodes.map((n) => n.cluster).filter(Boolean))];
 
-  // Initial fit frames the linked part (the interesting structure); unlinked nodes are a pan away
-  const focus = linked.size >= 2 ? spec.nodes.filter((n) => linked.has(n.id)) : spec.nodes;
+  // The first view frames every node
+  const focus = spec.nodes;
   const box = focus.reduce(
     (b, n) => {
       const p = positions.get(n.id);
@@ -156,12 +166,14 @@ export function layoutSpec(spec) {
       },
     })),
     edges: edges.map((e, i) => {
-      const s = anchor(e.source, true);
-      const t = anchor(e.target, false);
+      const back = isBack(e);
+      const s = anchor(e.source, !back);
+      const t = anchor(e.target, back);
       return {
         id: e.id ?? `e${i}-${e.source}-${e.target}`,
         source: e.source,
         target: e.target,
+        back,
         label: e.label ?? null,
         weight: e.weight ?? 1,
         labelX: (s.x + t.x) / 2,
@@ -200,7 +212,8 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
   const litNodes = new Set(activeNodeId ? [activeNodeId] : []);
   for (const e of layout.edges) if (active.has(e.id)) litNodes.add(e.source).add(e.target);
 
-  const shown = pickLabels(layout.edges, new Set([...top, ...active]), active);
+  const nodeBoxes = layout.nodes.map((n) => ({ x1: n.position.x, y1: n.position.y, x2: n.position.x + n.width, y2: n.position.y + n.height }));
+  const shown = pickLabels(layout.edges, new Set([...top, ...active]), active, nodeBoxes);
 
   return {
     nodes: layout.nodes.map((n) => ({ ...n, className: cn(focusOn && !litNodes.has(n.id) && 'cg-flow-dim') || undefined })),
@@ -215,6 +228,7 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
         source: e.source,
         target: e.target,
         type: 'default',
+        ...(e.back ? { sourceHandle: BACK_SOURCE, targetHandle: BACK_TARGET } : {}),
         label: shown.has(e.id) ? e.label : undefined,
         ariaLabel: e.label ? `${name}, ${e.label}` : name,
         data: { weight: e.weight },
@@ -231,7 +245,16 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
   };
 }
 
+// Extra handles for back edges (rendered after the default ones, which edges use when no id is set)
+const BACK_SOURCE = 'back-source';
+const BACK_TARGET = 'back-target';
+
+// Below this zoom the second line is too small to read, so only the name is shown
+export const SUBLABEL_MIN_ZOOM = 0.6;
+const compactSelector = (st) => st.transform[2] < SUBLABEL_MIN_ZOOM;
+
 function DiagramNode({ data }) {
+  const compact = useStore(compactSelector);
   return (
     <div
       className={cn(
@@ -241,47 +264,59 @@ function DiagramNode({ data }) {
       title={data.nodeRef || data.label}
     >
       <Handle type="target" position={data.vertical ? Position.Top : Position.Left} isConnectable={false} />
+      <Handle type="target" id={BACK_TARGET} position={data.vertical ? Position.Bottom : Position.Right} isConnectable={false} />
       <div className="flex min-w-0 items-center gap-2">
         {data.color && <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: data.color }} />}
         <span className="truncate text-cg-sm font-medium text-cg-text">{data.label}</span>
       </div>
-      {data.sublabel && <span className="truncate font-cg-mono text-cg-xs text-cg-tertiary">{data.sublabel}</span>}
+      {data.sublabel && !compact && <span className="truncate font-cg-mono text-cg-xs text-cg-tertiary">{data.sublabel}</span>}
       <Handle type="source" position={data.vertical ? Position.Bottom : Position.Right} isConnectable={false} />
+      <Handle type="source" id={BACK_SOURCE} position={data.vertical ? Position.Top : Position.Left} isConnectable={false} />
     </div>
   );
 }
 
 const NODE_TYPES = { cg: DiagramNode };
 
-// Never fit below this zoom on first view: labels stay legible; the rest is a pan or "Fit diagram" away
-const MIN_FIT_ZOOM = 0.65;
 const MAX_FIT_ZOOM = 1.25;
-const FIT_PADDING = 24;
+export const FIT_PADDING = 0.15; // share of the content size, as React Flow's fitView padding
+export const DEFAULT_MIN_ZOOM = 0.2;
 
-function Controls({ onRequestFullscreen, focusBox }) {
+/** Zoom that fits `box` in a pane with FIT_PADDING, capped at MAX_FIT_ZOOM (no lower bound). */
+export function fitZoom(box, paneW, paneH) {
+  const w = (box.x2 - box.x1) * (1 + FIT_PADDING);
+  const h = (box.y2 - box.y1) * (1 + FIT_PADDING);
+  return Math.min(MAX_FIT_ZOOM, paneW / Math.max(w, 1), paneH / Math.max(h, 1));
+}
+
+function Controls({ onRequestFullscreen, focusBox, onFitZoom }) {
   const { setViewport } = useReactFlow();
   const paneW = useStore((st) => st.width);
   const paneH = useStore((st) => st.height);
+  const setStoreMinZoom = useStore((st) => st.setMinZoom);
 
   const fit = useCallback(
-    (minZoom, duration) => {
+    (duration) => {
       if (!paneW || !paneH || !focusBox) return;
-      const w = focusBox.x2 - focusBox.x1 + FIT_PADDING * 2;
-      const h = focusBox.y2 - focusBox.y1 + FIT_PADDING * 2;
-      const zoom = Math.max(minZoom, Math.min(MAX_FIT_ZOOM, paneW / w, paneH / h));
+      const zoom = fitZoom(focusBox, paneW, paneH);
+      // The min zoom follows the fit, so a large diagram can be seen whole. The store is
+      // updated first (setViewport clamps to it); the prop keeps it on re-render.
+      const min = Math.min(DEFAULT_MIN_ZOOM, zoom);
+      setStoreMinZoom(min);
+      onFitZoom(min);
       const cx = (focusBox.x1 + focusBox.x2) / 2;
       const cy = (focusBox.y1 + focusBox.y2) / 2;
       setViewport({ x: paneW / 2 - cx * zoom, y: paneH / 2 - cy * zoom, zoom }, { duration });
     },
-    [paneW, paneH, focusBox, setViewport],
+    [paneW, paneH, focusBox, setViewport, onFitZoom, setStoreMinZoom],
   );
 
-  // First fit as soon as the pane has a size (and again if it is resized)
-  useEffect(() => fit(MIN_FIT_ZOOM, 0), [fit]);
+  // First fit, on everything, as soon as the pane has a size (and again if it is resized)
+  useEffect(() => fit(0), [fit]);
 
   return (
     <div className="absolute right-2 top-2 z-10 flex gap-1">
-      <IconButton label="Fit diagram" size="sm" variant="secondary" onClick={() => fit(0.2, prefersReducedMotion() ? 0 : 200)}>
+      <IconButton label="Fit diagram" size="sm" variant="secondary" onClick={() => fit(prefersReducedMotion() ? 0 : 200)}>
         <Maximize2 size={14} strokeWidth={1.5} aria-hidden="true" />
       </IconButton>
       {onRequestFullscreen && (
@@ -315,6 +350,8 @@ function FlowDiagramInner({ spec, onNodeClick, height = 320, wheelZoom = false, 
   const [selected, setSelected] = useState(null);
   const [hoverEdge, setHoverEdge] = useState(null);
   const [focusEdge, setFocusEdge] = useState(null);
+  const [minZoom, setMinZoom] = useState(DEFAULT_MIN_ZOOM);
+  const onFitZoom = useCallback((z) => setMinZoom(z), []);
   useEffect(() => setSelected(null), [spec]);
 
   const activeNodeId = hoverNode ?? focusNode ?? selected;
@@ -364,7 +401,7 @@ function FlowDiagramInner({ spec, onNodeClick, height = 320, wheelZoom = false, 
         edges={edges}
         nodeTypes={NODE_TYPES}
         colorMode="dark"
-        minZoom={0.2}
+        minZoom={minZoom}
         maxZoom={2}
         nodesDraggable={false}
         nodesConnectable={false}
@@ -386,7 +423,7 @@ function FlowDiagramInner({ spec, onNodeClick, height = 320, wheelZoom = false, 
           activate(node.id);
         }}
       >
-        <Controls onRequestFullscreen={onRequestFullscreen} focusBox={layout.focusBox} />
+        <Controls onRequestFullscreen={onRequestFullscreen} focusBox={layout.focusBox} onFitZoom={onFitZoom} />
       </ReactFlow>
     </div>
   );

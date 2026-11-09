@@ -36,28 +36,101 @@ def _text(node) -> str:
 # ---------------------------------------------------------------------------
 # Docstring extraction helper
 # ---------------------------------------------------------------------------
+_STRING_PREFIX_RE = re.compile(r"^[rRuUbB]{0,2}")
+MAX_MODULE_DOC = 400
+MAX_CLASS_DOC = 200
+
+
 def _get_docstring(body_node, source_bytes: bytes) -> str | None:
     """
-    Given a block node, return the first string literal inside it if it
-    looks like a docstring, else None.
+    Given a block (or module) node, return its docstring: the first statement,
+    if it is a plain string literal. Comments before it are skipped.
     """
     if body_node is None or body_node.child_count == 0:
         return None
 
-    first_child = body_node.children[0]
+    first_child = next((c for c in body_node.children if c.type != "comment"), None)
 
     # The docstring is an expression_statement containing a string node
-    if first_child.type == "expression_statement":
+    if first_child is not None and first_child.type == "expression_statement":
         if first_child.child_count > 0 and first_child.children[0].type == "string":
             raw = first_child.children[0].text.decode("utf-8", errors="replace")
+            raw = _STRING_PREFIX_RE.sub("", raw, count=1)
             # Strip triple-quote or single-quote wrappers
             for q in ('"""', "'''", '"', "'"):
-                if raw.startswith(q) and raw.endswith(q):
+                if raw.startswith(q) and raw.endswith(q) and len(raw) >= 2 * len(q):
                     raw = raw[len(q):-len(q)]
                     break
             return raw.strip() or None
 
     return None
+
+
+def _short_doc(doc: str | None, limit: int) -> str:
+    """Whitespace-collapsed docstring, cut to `limit` characters."""
+    return " ".join(doc.split())[:limit] if doc else ""
+
+
+# ---------------------------------------------------------------------------
+# Lightweight type facts (for resolving self.x.m() and v.m())
+# ---------------------------------------------------------------------------
+_TYPE_NAME_RE = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
+_OPTIONAL_RE = re.compile(r"(?:typing\.)?Optional\[(.+)\]")
+
+
+def _type_name(text: str) -> str | None:
+    """Annotation text → a single dotted class name ("Optional[Foo]", "Foo | None", "'Foo'" → "Foo")."""
+    t = text.strip().strip("'\"")
+    m = _OPTIONAL_RE.fullmatch(t)
+    if m:
+        t = m.group(1)
+    parts = [p.strip().strip("'\"") for p in t.split("|")]
+    parts = [p for p in parts if p and p != "None"]
+    if len(parts) != 1 or not _TYPE_NAME_RE.fullmatch(parts[0]):
+        return None
+    return parts[0]
+
+
+def _param_types(params_node) -> dict:
+    types = {}
+    if params_node is None:
+        return types
+    for child in params_node.children:
+        if child.type not in ("typed_parameter", "typed_default_parameter"):
+            continue
+        name_child = child.child_by_field_name("name") or next((s for s in child.children if s.type == "identifier"), None)
+        type_child = child.child_by_field_name("type")
+        if name_child is None or type_child is None:
+            continue
+        type_name = _type_name(_text(type_child))
+        if type_name:
+            types[_text(name_child)] = type_name
+    return types
+
+
+def _value_type(value, param_types: dict) -> str | None:
+    """Class name a value evidently has: Foo(...), mod.Foo(...), an annotated param, or `x or Foo()`."""
+    if value is None:
+        return None
+    if value.type == "call":
+        fn = value.child_by_field_name("function")
+        if _is_dotted(fn) and not _text(fn).startswith(("self.", "cls.")):
+            return _text(fn)
+        return None
+    if value.type == "identifier":
+        return param_types.get(_text(value))
+    if value.type == "boolean_operator":
+        found = {t for t in (_value_type(value.child_by_field_name(side), param_types) for side in ("left", "right")) if t}
+        return found.pop() if len(found) == 1 else None
+    return None
+
+
+def _note_type(table: dict, name: str, type_name: str | None) -> None:
+    """First type seen wins; a conflicting or unknown later binding makes the name ambiguous (None)."""
+    if name not in table:
+        table[name] = type_name
+    elif table[name] != type_name:
+        table[name] = None
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +193,8 @@ def _describe_call(call_node) -> dict | None:
       super     super().m()               {"attr": "m"}
       dotted    a.b.f()                   {"base": "a.b", "attr": "f"}
       instance  Store().get()             {"ctor": "Store", "attr": "get"}
-      unknown   obj.m(), self.x.m(), "".join()  {"attr": "m"}
+      self_attr self.x.m()                {"receiver": "self", "name": "x", "attr": "m"}
+      unknown   obj.m(), f().m(), "".join()  {"attr": "m"}
     """
     fn = call_node.child_by_field_name("function")
     if fn is None:
@@ -135,6 +209,12 @@ def _describe_call(call_node) -> dict | None:
         return None
     if obj is not None and obj.type == "identifier" and _text(obj) in ("self", "cls"):
         return {"kind": "self", "receiver": _text(obj), "attr": attr}
+    if obj is not None and obj.type == "attribute":
+        inner_obj = obj.child_by_field_name("object")
+        inner_attr = obj.child_by_field_name("attribute")
+        if inner_obj is not None and inner_obj.type == "identifier" and _text(inner_obj) in ("self", "cls") and inner_attr is not None:
+            # self.x.m(): resolvable when the type of attribute x is known
+            return {"kind": "self_attr", "receiver": _text(inner_obj), "name": _text(inner_attr), "attr": attr}
     if obj is not None and obj.type == "call":
         inner = obj.child_by_field_name("function")
         if inner is not None and inner.type == "identifier" and _text(inner) == "super":
@@ -228,6 +308,7 @@ def _is_main_guard(if_node) -> bool:
 def _walk(tree, source_bytes: bytes, path: str) -> dict:
     functions, classes, imports, call_sites = [], [], [], []
     seen_calls = set()
+    fn_by_id, class_by_qual = {}, {}  # for type facts gathered while walking bodies
 
     # Iterative DFS: (node, scope, in_main_guard). scope = tuple of ("class"|"function", name)
     stack = [(tree.root_node, (), False)]
@@ -266,7 +347,10 @@ def _walk(tree, source_bytes: bytes, path: str) -> dict:
                 "method_names": method_names,
                 "is_nested": bool(scope),
                 "docstring": _get_docstring(body, source_bytes),
+                "attr_types": {},
             })
+            classes[-1]["doc"] = _short_doc(classes[-1]["docstring"], MAX_CLASS_DOC)
+            class_by_qual[qual] = classes[-1]
             child_scope = scope + (("class", name),)
 
         elif t == "function_definition":
@@ -287,7 +371,10 @@ def _walk(tree, source_bytes: bytes, path: str) -> dict:
                 "is_nested": any(s[0] == "function" for s in scope),
                 "decorator_names": _decorators(node),
                 "docstring": _get_docstring(node.child_by_field_name("body"), source_bytes),
+                "param_types": _param_types(node.child_by_field_name("parameters")),
+                "local_types": {},
             })
+            fn_by_id[f"{path}::{qual}"] = functions[-1]
             child_scope = scope + (("function", name),)
 
         elif t == "import_statement":
@@ -296,6 +383,9 @@ def _walk(tree, source_bytes: bytes, path: str) -> dict:
             parsed = _parse_import_from(node)
             if parsed:
                 imports.append(parsed)
+
+        elif t == "assignment":
+            _record_assignment(node, scope, path, fn_by_id, class_by_qual)
 
         elif t == "if_statement" and not scope and _is_main_guard(node):
             child_main = True
@@ -336,11 +426,66 @@ def _walk(tree, source_bytes: bytes, path: str) -> dict:
         for child in reversed(node.children):
             stack.append((child, child_scope, child_main))
 
+    # Only unambiguous type facts are kept
+    for fn in functions:
+        fn["local_types"] = {k: v for k, v in fn["local_types"].items() if v}
+    for cls in classes:
+        cls["attr_types"] = {k: v for k, v in cls["attr_types"].items() if v}
+
     # Stable, source-ordered output
     functions.sort(key=lambda f: (f["start_line"], f["qualified_name"]))
     classes.sort(key=lambda c: (c["start_line"], c["qualified_name"]))
     call_sites.sort(key=lambda c: (c["line"], c["caller_id"], c["callee"]))
-    return {"functions": functions, "classes": classes, "imports": imports, "call_sites": call_sites}
+    return {
+        "functions": functions,
+        "classes": classes,
+        "imports": imports,
+        "call_sites": call_sites,
+        "doc": _short_doc(_get_docstring(tree.root_node, source_bytes), MAX_MODULE_DOC),
+    }
+
+
+def _record_assignment(node, scope, path, fn_by_id, class_by_qual) -> None:
+    """
+    Type facts from one assignment:
+      in a function   v = Foo(...) / v: Foo        → local v: Foo
+      in a method     self.x = Foo(...) / self.x = typed_param / self.x: Foo  → class attr x: Foo
+      in a class body x: Foo / x = Foo()           → class attr x: Foo
+    `x = None` is ignored, so `self.x = None` followed by `self.x = Foo()` still types x.
+    """
+    left = node.child_by_field_name("left")
+    right = node.child_by_field_name("right")
+    annotation = node.child_by_field_name("type")
+    if left is None or (right is not None and right.type == "none"):
+        return
+    fn_depth = max((i for i, s in enumerate(scope) if s[0] == "function"), default=-1)
+    fn = fn_by_id.get(f"{path}::" + ".".join(s[1] for s in scope[: fn_depth + 1])) if fn_depth >= 0 else None
+    params = fn["param_types"] if fn else {}
+    if annotation is not None:
+        type_name = _type_name(_text(annotation))
+    else:
+        type_name = _value_type(right, params)
+
+    if fn_depth < 0:
+        # Class body (class attribute / annotation)
+        if scope and scope[-1][0] == "class" and left.type == "identifier":
+            cls = class_by_qual.get(".".join(s[1] for s in scope))
+            if cls is not None and (type_name or annotation is not None):
+                _note_type(cls["attr_types"], _text(left), type_name)
+        return
+    if fn is None:
+        return
+    if left.type == "identifier":
+        _note_type(fn["local_types"], _text(left), type_name)
+        return
+    if left.type == "attribute":
+        obj = left.child_by_field_name("object")
+        attr = left.child_by_field_name("attribute")
+        is_method = fn_depth > 0 and scope[fn_depth - 1][0] == "class"
+        if is_method and obj is not None and obj.type == "identifier" and _text(obj) == "self" and attr is not None:
+            cls = class_by_qual.get(".".join(s[1] for s in scope[:fn_depth]))
+            if cls is not None:
+                _note_type(cls["attr_types"], _text(attr), type_name)
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +504,7 @@ def parse_file(path: str, content: str) -> dict:
         "classes": [],
         "imports": [],
         "call_sites": [],
+        "doc": "",
     }
 
     if not content or not content.strip():

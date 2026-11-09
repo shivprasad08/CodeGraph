@@ -1,166 +1,124 @@
-// Deterministic module-level architecture from the code graph (no LLM).
-//
-// Modules are the second-level directories of the main package
-// (src/miniredis/election → "election"). Top-level files in the package are their
-// own module when they hold ≥3 functions/classes; smaller ones share the package
-// module. scripts/ and tests/ are grouped and hidden unless asked for.
+// Maps the backend's module grouping (graph.architecture, see backend/architecture.py)
+// to a FlowDiagram spec. The grouping itself (directories / communities / hybrid) is
+// computed once on the server and cached with the graph.
 
-const HIDDEN_GROUPS = { scripts: 'scripts', script: 'scripts', bin: 'scripts', tests: 'tests', test: 'tests' };
-const NOT_PACKAGES = new Set(['scripts', 'script', 'bin', 'tests', 'test', 'docs', 'doc', 'examples', 'example', 'benchmarks']);
-const MIN_SYMBOLS_FOR_OWN_MODULE = 3;
-export const MAX_EDGES = 20;
 export const MIN_EDGE_WEIGHT = 2;
+export const HIDDEN_MODULE_ID = 'mod:__hidden__';
 
-const fileOf = (node) => (node.type === 'file' ? node.id : node.file);
-const stripPy = (name) => name.replace(/\.py$/, '');
+const plural = (n, word) => `${n} ${n === 1 ? word : `${word}s`}`;
+const idOf = (end) => (typeof end === 'object' && end !== null ? end.id : end);
 
-/** Finds the main package directory ("src/miniredis", "flask", or "" for a flat repo). */
-export function findPackageRoot(filePaths) {
-  const counts = new Map();
-  for (const p of filePaths) {
-    const parts = p.split('/');
-    if (parts.length < 2 || NOT_PACKAGES.has(parts[0])) continue;
-    // src-layout: the package is the directory under src/
-    const root = parts[0] === 'src' && parts.length > 2 ? `src/${parts[1]}` : parts[0];
-    counts.set(root, (counts.get(root) ?? 0) + 1);
-  }
-  let best = '';
-  let bestCount = 0;
-  for (const [root, n] of counts) {
-    if (n > bestCount) [best, bestCount] = [root, n];
-  }
-  return best;
-}
+/** Human description of how the modules were grouped. */
+export const METHOD_LABEL = {
+  directories: 'Grouped by directory',
+  communities: 'Grouped by call and import communities',
+  hybrid: 'Grouped by directory, largest directory split by calls',
+};
 
 /**
- * Assigns every file to a module.
- * @returns {Map<string, {id, label, hidden, files: string[]}>} keyed by module id
+ * Builds a FlowDiagram spec from graph.architecture.
+ * @param {object} graph CodeGraph graph ({ nodes, edges, architecture })
+ * @param {{ includeHidden?: boolean }} [options] Adds hidden files (tests, scripts…) as one module.
+ * @returns {{ direction, nodes, edges, hiddenCount, method, missing }}
  */
-export function groupModules(graph) {
-  const nodes = graph?.nodes ?? [];
-  const files = nodes.filter((n) => n.type === 'file').map((n) => n.id);
-  const symbolsPerFile = new Map();
-  for (const n of nodes) {
-    if (n.type === 'function' || n.type === 'class') symbolsPerFile.set(n.file, (symbolsPerFile.get(n.file) ?? 0) + 1);
+export function buildArchitecture(graph, { includeHidden = false } = {}) {
+  const arch = graph?.architecture;
+  if (!arch || !Array.isArray(arch.modules)) {
+    return { direction: 'TB', nodes: [], edges: [], hiddenCount: 0, method: null, missing: true };
   }
-  const root = findPackageRoot(files);
-  const pkgName = root.split('/').pop() || 'root';
-  const modules = new Map();
-  const add = (id, label, hidden, file) => {
-    if (!modules.has(id)) modules.set(id, { id, label, hidden, files: [] });
-    modules.get(id).files.push(file);
-  };
+  const nodes = graph.nodes ?? [];
+  const hidden = arch.hidden ?? [];
+  const modules = arch.modules.map((m) => ({ ...m }));
+  let edges = (arch.edges ?? []).map((e) => ({ ...e }));
 
-  for (const file of files) {
-    const parts = file.split('/');
-    if (root && file.startsWith(`${root}/`)) {
-      const rel = file.slice(root.length + 1).split('/');
-      if (rel.length > 1) add(`mod:${rel[0]}`, rel[0], false, file); // sub-package
-      else if ((symbolsPerFile.get(file) ?? 0) >= MIN_SYMBOLS_FOR_OWN_MODULE) add(`mod:${stripPy(rel[0])}`, stripPy(rel[0]), false, file);
-      else add(`mod:${pkgName}`, pkgName, false, file); // small top-level files share the package module
-      continue;
+  if (includeHidden && hidden.length) {
+    const hiddenSet = new Set(hidden);
+    let functions = 0;
+    let classes = 0;
+    let entry = false;
+    for (const n of nodes) {
+      if (!hiddenSet.has(n.file)) continue;
+      if (n.type === 'function') functions += 1;
+      if (n.type === 'class') classes += 1;
+      if (n.is_entry_point && n.type !== 'file') entry = true;
     }
-    const group = HIDDEN_GROUPS[parts[0]];
-    if (group) add(`mod:${group}`, group, true, file);
-    else if (parts[0] === 'src' && parts.length > 2) add(`mod:${parts[1]}`, parts[1], false, file); // another src/ package
-    else if (parts.length > 1) add(`mod:${parts[0]}`, parts[0], false, file); // other top-level directories
-    else if ((symbolsPerFile.get(file) ?? 0) >= MIN_SYMBOLS_FOR_OWN_MODULE) add(`mod:${stripPy(file)}`, stripPy(file), false, file);
-    else add('mod:root', 'root files', false, file);
-  }
-  return modules;
-}
-
-/**
- * Builds a FlowDiagram spec of modules and the calls/imports between them.
- * @param {object} graph CodeGraph graph ({ nodes, edges })
- * @param {{ includeHidden?: boolean, maxEdges?: number, minWeight?: number }} [options]
- * @returns {{ direction, nodes, edges, hiddenCount }}
- */
-export function buildArchitecture(graph, { includeHidden = false, maxEdges = MAX_EDGES, minWeight = MIN_EDGE_WEIGHT } = {}) {
-  const nodes = graph?.nodes ?? [];
-  const modules = groupModules(graph);
-  const moduleOfFile = new Map();
-  for (const m of modules.values()) for (const f of m.files) moduleOfFile.set(f, m);
-
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const moduleOfNode = (id) => {
-    const node = byId.get(typeof id === 'object' ? id.id : id);
-    return node ? moduleOfFile.get(fileOf(node)) : undefined;
-  };
-  const visible = (m) => m && (includeHidden || !m.hidden);
-
-  // Per-module stats
-  const stats = new Map([...modules.keys()].map((id) => [id, { functions: 0, classes: 0, entry: false }]));
-  for (const n of nodes) {
-    const m = moduleOfFile.get(fileOf(n));
-    if (!m) continue;
-    const s = stats.get(m.id);
-    if (n.type === 'function') s.functions += 1;
-    if (n.type === 'class') s.classes += 1;
-    if (n.is_entry_point && n.type !== 'file') s.entry = true;
+    modules.push({
+      id: HIDDEN_MODULE_ID,
+      label: 'scripts and tests',
+      files: [...hidden],
+      function_count: functions,
+      class_count: classes,
+      has_entry_points: entry,
+    });
+    edges = edges.concat(hiddenModuleEdges(graph, modules, hiddenSet));
   }
 
-  // Aggregate calls + imports between different, visible modules
-  const agg = new Map();
-  for (const e of graph?.edges ?? []) {
-    if (e.type !== 'calls' && e.type !== 'imports') continue;
-    const a = moduleOfNode(e.source);
-    const b = moduleOfNode(e.target);
-    if (!visible(a) || !visible(b) || a.id === b.id) continue; // unknown targets and self-loops dropped
-    const key = `${a.id}→${b.id}`;
-    if (!agg.has(key)) agg.set(key, { source: a.id, target: b.id, calls: 0, imports: 0 });
-    agg.get(key)[e.type === 'calls' ? 'calls' : 'imports'] += 1;
-  }
-  const edges = [...agg.values()]
-    .map((e) => ({ ...e, weight: e.calls + e.imports }))
-    .filter((e) => e.weight >= minWeight)
-    .sort((x, y) => y.weight - x.weight || x.source.localeCompare(y.source) || x.target.localeCompare(y.target))
-    .slice(0, maxEdges)
-    .map((e) => ({
-      id: `${e.source}→${e.target}`,
-      source: e.source,
-      target: e.target,
-      weight: e.weight,
-      label: e.calls ? `${e.calls} ${e.calls === 1 ? 'call' : 'calls'}` : `${e.imports} ${e.imports === 1 ? 'import' : 'imports'}`,
-    }));
+  // Representative file per module (most functions/classes): opened when the module is selected
+  const symbols = new Map();
+  for (const n of nodes) if (n.type === 'function' || n.type === 'class') symbols.set(n.file, (symbols.get(n.file) ?? 0) + 1);
+  const mainFile = (files) => [...files].sort((x, y) => (symbols.get(y) ?? 0) - (symbols.get(x) ?? 0) || x.localeCompare(y))[0];
 
   const inDegree = new Map();
   for (const e of edges) inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + e.weight);
-
   // Entry-point modules first, then by in-degree (leaf utilities end up last); dagre does the rest
-  const shown = [...modules.values()].filter(visible);
-  shown.sort(
+  modules.sort(
     (a, b) =>
-      Number(stats.get(b.id).entry) - Number(stats.get(a.id).entry) ||
+      Number(b.has_entry_points) - Number(a.has_entry_points) ||
       (inDegree.get(a.id) ?? 0) - (inDegree.get(b.id) ?? 0) ||
       a.label.localeCompare(b.label),
   );
 
-  const specNodes = shown.map((m) => {
-    const s = stats.get(m.id);
-    // Representative file: the one with the most functions/classes
-    const main = [...m.files].sort(
-      (x, y) => nodes.filter((n) => n.file === y).length - nodes.filter((n) => n.file === x).length || x.localeCompare(y),
-    )[0];
-    const fileCount = m.files.length;
-    return {
-      id: m.id,
-      label: m.label,
-      sublabel: `${fileCount} ${fileCount === 1 ? 'file' : 'files'} · ${s.functions} ${s.functions === 1 ? 'function' : 'functions'}`,
-      kind: 'module',
-      nodeRef: main,
-      cluster: main,
-      members: m.files,
-      entry: s.entry,
-    };
-  });
-
   return {
     direction: 'TB',
-    nodes: specNodes,
-    edges,
-    hiddenCount: [...modules.values()].filter((m) => m.hidden).length,
+    method: arch.method ?? null,
+    missing: false,
+    hiddenCount: hidden.length,
+    nodes: modules.map((m) => {
+      const main = mainFile(m.files);
+      return {
+        id: m.id,
+        label: m.label,
+        sublabel: `${plural(m.files.length, 'file')} · ${plural(m.function_count, 'function')}`,
+        kind: 'module',
+        nodeRef: main,
+        cluster: main,
+        members: m.files,
+        entry: m.has_entry_points,
+      };
+    }),
+    edges: edges.map((e) => ({
+      id: `${e.source}→${e.target}`,
+      source: e.source,
+      target: e.target,
+      weight: e.weight,
+      label: e.calls ? plural(e.calls, 'call') : plural(e.imports, 'import'),
+    })),
   };
+}
+
+/** Calls/imports between the hidden-files module and the others (weight ≥ MIN_EDGE_WEIGHT). */
+function hiddenModuleEdges(graph, modules, hiddenSet) {
+  const moduleOfFile = new Map();
+  for (const m of modules) for (const f of m.files) moduleOfFile.set(f, m.id);
+  const fileOf = new Map((graph.nodes ?? []).map((n) => [n.id, n.type === 'file' ? n.id : n.file]));
+  const agg = new Map();
+  for (const e of graph.edges ?? []) {
+    if (e.type !== 'calls' && e.type !== 'imports') continue;
+    const fa = fileOf.get(idOf(e.source));
+    const fb = fileOf.get(idOf(e.target));
+    if (!fa || !fb || (!hiddenSet.has(fa) && !hiddenSet.has(fb))) continue;
+    const a = moduleOfFile.get(fa);
+    const b = moduleOfFile.get(fb);
+    if (!a || !b || a === b) continue;
+    const key = `${a}→${b}`;
+    if (!agg.has(key)) agg.set(key, { source: a, target: b, calls: 0, imports: 0, weight: 0 });
+    const row = agg.get(key);
+    row[e.type === 'calls' ? 'calls' : 'imports'] += 1;
+    row.weight += 1;
+  }
+  return [...agg.values()]
+    .filter((e) => e.weight >= MIN_EDGE_WEIGHT)
+    .sort((x, y) => y.weight - x.weight || x.source.localeCompare(y.source) || x.target.localeCompare(y.target));
 }
 
 const ARCHITECTURE_INTENT = /architecture|overall structure|how is .* organi[sz]ed|high[- ]level|overview|components/i;

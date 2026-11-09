@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ALWAYS_LABELLED, LABEL_GAP, decorate, labelBox, layoutSpec, pickLabels } from '../FlowDiagram';
+import { ALWAYS_LABELLED, FIT_PADDING, LABEL_GAP, decorate, fitZoom, labelBox, layoutSpec, pickLabels } from '../FlowDiagram';
 
 const tokens = { borderStrong: '#555', canvas: '#000', text: '#fff', secondary: '#aaa', tertiary: '#888' };
 const spec = {
@@ -43,8 +43,15 @@ describe('layoutSpec', () => {
     expect(ab.ariaLabel).toBe('A to B, 10 calls');
   });
 
-  it('frames only the linked part for the first fit and marks clickable nodes', () => {
-    expect(layout.focusBox.y2).toBeLessThan(pos.lonely1.y);
+  it('frames every node for the first fit, and the fit zoom can go below the default minimum', () => {
+    expect(layout.focusBox.y2).toBeGreaterThan(pos.lonely1.y);
+    const box = { x1: 0, y1: 0, x2: 4000, y2: 1000 };
+    expect(fitZoom(box, 800, 600)).toBeCloseTo(800 / (4000 * (1 + FIT_PADDING)));
+    expect(fitZoom(box, 800, 600)).toBeLessThan(0.2);
+    expect(fitZoom({ x1: 0, y1: 0, x2: 100, y2: 50 }, 800, 600)).toBe(1.25); // capped
+  });
+
+  it('marks clickable nodes', () => {
     expect(layout.nodes.find((n) => n.id === 'a').data.clickable).toBe(true);
     expect(layout.nodes.find((n) => n.id === 'b').data.clickable).toBe(false);
     expect(layout.nodes.find((n) => n.id === 'a').ariaLabel).toBe('A, 1 file · 2 functions');
@@ -99,6 +106,12 @@ describe('edge labels', () => {
     expect([...pickLabels(edges, all, new Set(['light']))].sort()).toEqual(['light']);
   });
 
+  it('skips a label that would sit under a node', () => {
+    const edges = [{ id: 'e', label: '3 calls', weight: 3, labelX: 100, labelY: 100 }];
+    expect([...pickLabels(edges, new Set(['e']), new Set(), [{ x1: 90, y1: 95, x2: 300, y2: 150 }])]).toEqual([]);
+    expect([...pickLabels(edges, new Set(['e']), new Set(), [{ x1: 200, y1: 95, x2: 300, y2: 150 }])]).toEqual(['e']);
+  });
+
   it('keeps every rendered label at least LABEL_GAP apart in a real layout', () => {
     const layout = layoutSpec(fan(12, () => 5));
     const { edges } = decorate(layout, { tokens, activeNodeId: 'hub' });
@@ -112,6 +125,29 @@ describe('edge labels', () => {
         expect(Math.max(a.x1 - b.x2, b.x1 - a.x2, a.y1 - b.y2, b.y1 - a.y2)).toBeGreaterThanOrEqual(LABEL_GAP);
       }
     }
+  });
+});
+
+describe('back edges', () => {
+  it('route a target above its source from the source top to the target bottom', () => {
+    const layout = layoutSpec({
+      direction: 'TB',
+      nodes: ['a', 'b', 'c'].map((id) => ({ id, label: id })),
+      edges: [
+        { source: 'a', target: 'b', weight: 3 },
+        { source: 'b', target: 'c', weight: 3 },
+        { source: 'c', target: 'a', weight: 2 }, // back up the chain
+      ],
+    });
+    const { edges } = decorate(layout, { tokens });
+    const byPair = Object.fromEntries(edges.map((e) => [`${e.source}→${e.target}`, e]));
+    expect(byPair['a→b'].sourceHandle).toBeUndefined();
+    expect(byPair['c→a'].sourceHandle).toBe('back-source');
+    expect(byPair['c→a'].targetHandle).toBe('back-target');
+    // label midpoint between c's top and a's bottom
+    const pos = Object.fromEntries(layout.nodes.map((n) => [n.id, n]));
+    const back = layout.edges.find((e) => e.source === 'c');
+    expect(back.labelY).toBe((pos.c.position.y + pos.a.position.y + pos.a.height) / 2);
   });
 });
 

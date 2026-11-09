@@ -1,128 +1,89 @@
 import { describe, expect, it } from 'vitest';
-import { buildArchitecture, findPackageRoot, groupModules, isArchitectureQuestion } from '../architecture';
+import { HIDDEN_MODULE_ID, buildArchitecture, isArchitectureQuestion } from '../architecture';
 
-// src/app package with two sub-packages, two top-level files (one big, one small),
-// plus scripts/ and tests/.
 const file = (id) => ({ id, type: 'file' });
 const fn = (file, name, extra = {}) => ({ id: `${file}::${name}`, label: name, type: 'function', file, ...extra });
+const call = (s, t) => ({ source: s, target: t, type: 'calls' });
 
 const nodes = [
-  file('src/app/api/routes.py'),
-  file('src/app/api/auth.py'),
-  file('src/app/db/models.py'),
-  file('src/app/server.py'),
-  file('src/app/version.py'),
+  file('app/api/routes.py'),
+  file('app/api/auth.py'),
+  file('app/db/models.py'),
+  file('app/server.py'),
   file('scripts/seed.py'),
   file('tests/test_api.py'),
-  fn('src/app/api/routes.py', 'index', { is_entry_point: true }),
-  fn('src/app/api/routes.py', 'login'),
-  fn('src/app/api/auth.py', 'check'),
-  fn('src/app/db/models.py', 'save'),
-  fn('src/app/db/models.py', 'load'),
-  fn('src/app/server.py', 'run'),
-  fn('src/app/server.py', 'stop'),
-  fn('src/app/server.py', 'serve'),
-  fn('src/app/version.py', 'get_version'),
-  fn('scripts/seed.py', 'seed'),
+  fn('app/api/routes.py', 'index'),
+  fn('app/api/routes.py', 'login'),
+  fn('app/api/auth.py', 'check'),
+  fn('app/db/models.py', 'save'),
+  fn('app/db/models.py', 'load'),
+  fn('app/server.py', 'run', { is_entry_point: true }),
+  fn('scripts/seed.py', 'seed', { is_entry_point: true }),
   fn('tests/test_api.py', 'test_index'),
 ];
 
-const call = (s, t) => ({ source: s, target: t, type: 'calls' });
+const architecture = {
+  method: 'directories',
+  modules: [
+    { id: 'mod:api', label: 'api', files: ['app/api/auth.py', 'app/api/routes.py'], function_count: 3, class_count: 0, has_entry_points: false },
+    { id: 'mod:db', label: 'db', files: ['app/db/models.py'], function_count: 2, class_count: 0, has_entry_points: false },
+    { id: 'mod:server', label: 'server', files: ['app/server.py'], function_count: 1, class_count: 0, has_entry_points: true },
+  ],
+  edges: [
+    { source: 'mod:api', target: 'mod:db', calls: 3, imports: 1, weight: 4 },
+    { source: 'mod:server', target: 'mod:api', calls: 0, imports: 2, weight: 2 },
+  ],
+  hidden: ['scripts/seed.py', 'tests/test_api.py'],
+};
+
 const edges = [
-  // api → db: 3 calls + 1 import (weight 4)
-  call('src/app/api/routes.py::index', 'src/app/db/models.py::load'),
-  call('src/app/api/routes.py::login', 'src/app/db/models.py::save'),
-  call('src/app/api/auth.py::check', 'src/app/db/models.py::load'),
-  { source: 'src/app/api/routes.py', target: 'src/app/db/models.py', type: 'imports' },
-  // server → api: 2 calls
-  call('src/app/server.py::run', 'src/app/api/routes.py::index'),
-  call('src/app/server.py::serve', 'src/app/api/routes.py::login'),
-  // api → app (version.py, small file): 1 call → below the weight cut
-  call('src/app/api/routes.py::index', 'src/app/version.py::get_version'),
-  // self-loops inside api
-  call('src/app/api/routes.py::login', 'src/app/api/auth.py::check'),
-  call('src/app/api/routes.py::index', 'src/app/api/auth.py::check'),
-  // scripts/tests → app (hidden by default)
-  call('scripts/seed.py::seed', 'src/app/db/models.py::save'),
-  call('scripts/seed.py::seed', 'src/app/db/models.py::load'),
-  call('tests/test_api.py::test_index', 'src/app/api/routes.py::index'),
-  call('tests/test_api.py::test_index', 'src/app/api/routes.py::login'),
-  // edge to a node that is not in the graph (external) is ignored
-  call('src/app/server.py::run', 'os::getenv'),
-  // "defines" edges never count
-  { source: 'src/app/db/models.py', target: 'src/app/db/models.py::save', type: 'defines' },
+  call('scripts/seed.py::seed', 'app/db/models.py::save'),
+  call('scripts/seed.py::seed', 'app/db/models.py::load'),
+  call('tests/test_api.py::test_index', 'app/api/routes.py::index'), // weight 1 → dropped
+  call('app/api/routes.py::index', 'app/db/models.py::load'), // between visible modules: already in architecture
 ];
-const graph = { nodes, edges };
+const graph = { nodes, edges, architecture };
 
-describe('module grouping', () => {
-  it('finds the package root, including src-layout', () => {
-    expect(findPackageRoot(nodes.filter((n) => n.type === 'file').map((n) => n.id))).toBe('src/app');
-    expect(findPackageRoot(['flask/app.py', 'flask/cli.py', 'docs/conf.py', 'tests/test_x.py'])).toBe('flask');
-    expect(findPackageRoot(['main.py', 'util.py'])).toBe('');
-  });
+describe('buildArchitecture (maps graph.architecture)', () => {
+  const spec = buildArchitecture(graph);
 
-  it('uses sub-packages, gives big top-level files their own module, and groups scripts/tests', () => {
-    const modules = groupModules(graph);
-    const summary = Object.fromEntries([...modules.values()].map((m) => [m.label, { files: m.files.length, hidden: m.hidden }]));
-    expect(summary).toEqual({
-      api: { files: 2, hidden: false },
-      db: { files: 1, hidden: false },
-      server: { files: 1, hidden: false }, // 3 functions → own module
-      app: { files: 1, hidden: false }, // version.py has 1 function → package module
-      scripts: { files: 1, hidden: true },
-      tests: { files: 1, hidden: true },
-    });
-  });
-});
-
-describe('buildArchitecture', () => {
-  it('aggregates calls + imports between modules, drops self-loops and weak edges', () => {
-    const arch = buildArchitecture(graph);
-    expect(arch.edges.map((e) => [e.source, e.target, e.weight, e.label])).toEqual([
-      ['mod:api', 'mod:db', 4, '3 calls'],
-      ['mod:server', 'mod:api', 2, '2 calls'],
-    ]);
-    expect(arch.edges.some((e) => e.source === e.target)).toBe(false);
-  });
-
-  it('hides scripts and tests by default and can include them', () => {
-    const arch = buildArchitecture(graph);
-    expect(arch.nodes.map((n) => n.label)).not.toContain('scripts');
-    expect(arch.hiddenCount).toBe(2);
-
-    const all = buildArchitecture(graph, { includeHidden: true });
-    expect(all.nodes.map((n) => n.label)).toEqual(expect.arrayContaining(['scripts', 'tests']));
-    expect(all.edges.map((e) => `${e.source}→${e.target}`)).toEqual(
-      expect.arrayContaining(['mod:scripts→mod:db', 'mod:tests→mod:api']),
-    );
-  });
-
-  it('keeps only the top N edges by weight', () => {
-    const many = { nodes: [...nodes], edges: [...edges] };
-    // 25 extra modules, each calling db 2..26 times
-    for (let i = 0; i < 25; i++) {
-      many.nodes.push(file(`src/app/m${i}/x.py`));
-      for (let k = 0; k < 2 + i; k++) {
-        many.nodes.push(fn(`src/app/m${i}/x.py`, `f${k}`));
-        many.edges.push(call(`src/app/m${i}/x.py::f${k}`, 'src/app/db/models.py::save'));
-      }
-    }
-    const arch = buildArchitecture(many);
-    expect(arch.edges).toHaveLength(20);
-    const weights = arch.edges.map((e) => e.weight);
-    expect(weights).toEqual([...weights].sort((a, b) => b - a));
-    expect(Math.min(...weights)).toBeGreaterThanOrEqual(7); // the weakest 2..6 were cut
-  });
-
-  it('labels nodes with file and function counts and orders entry-point modules first', () => {
-    const arch = buildArchitecture(graph);
-    const api = arch.nodes.find((n) => n.label === 'api');
+  it('labels modules with file and function counts and puts entry-point modules first', () => {
+    expect(spec.missing).toBe(false);
+    expect(spec.method).toBe('directories');
+    expect(spec.nodes.map((n) => n.id)).toEqual(['mod:server', 'mod:api', 'mod:db']); // entry first, then in-degree (api 2 < db 4)
+    const api = spec.nodes.find((n) => n.id === 'mod:api');
     expect(api.sublabel).toBe('2 files · 3 functions');
-    expect(api.entry).toBe(true);
-    expect(api.members).toEqual(['src/app/api/routes.py', 'src/app/api/auth.py']);
-    expect(api.nodeRef).toBe('src/app/api/routes.py'); // file with the most functions
-    expect(arch.nodes[0].label).toBe('api');
-    expect(arch.nodes.find((n) => n.label === 'server').sublabel).toBe('1 file · 3 functions');
+    expect(spec.nodes.find((n) => n.id === 'mod:server').sublabel).toBe('1 file · 1 function');
+    expect(api.members).toEqual(['app/api/auth.py', 'app/api/routes.py']);
+    expect(api.nodeRef).toBe('app/api/routes.py'); // most symbols
+    expect(api.kind).toBe('module');
+  });
+
+  it('labels edges by calls, or imports when there are no calls', () => {
+    expect(spec.edges).toEqual([
+      { id: 'mod:api→mod:db', source: 'mod:api', target: 'mod:db', weight: 4, label: '3 calls' },
+      { id: 'mod:server→mod:api', source: 'mod:server', target: 'mod:api', weight: 2, label: '2 imports' },
+    ]);
+  });
+
+  it('reports hidden files and can add them as one module with its own edges', () => {
+    expect(spec.hiddenCount).toBe(2);
+    expect(spec.nodes.some((n) => n.id === HIDDEN_MODULE_ID)).toBe(false);
+    const withHidden = buildArchitecture(graph, { includeHidden: true });
+    const hidden = withHidden.nodes.find((n) => n.id === HIDDEN_MODULE_ID);
+    expect(hidden.label).toBe('scripts and tests');
+    expect(hidden.sublabel).toBe('2 files · 2 functions');
+    expect(hidden.entry).toBe(true);
+    expect(withHidden.edges).toContainEqual({
+      id: `${HIDDEN_MODULE_ID}→mod:db`, source: HIDDEN_MODULE_ID, target: 'mod:db', weight: 2, label: '2 calls',
+    });
+    expect(withHidden.edges.some((e) => e.target === 'mod:api' && e.source === HIDDEN_MODULE_ID)).toBe(false);
+  });
+
+  it('flags graphs analysed before the architecture view existed', () => {
+    const old = buildArchitecture({ nodes, edges });
+    expect(old.missing).toBe(true);
+    expect(old.nodes).toEqual([]);
   });
 });
 
