@@ -1,8 +1,16 @@
-import { Routes, Route, Link } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
+import { Routes, Route, Link, useLocation } from 'react-router-dom';
 import LandingPageView from './views/LandingPageView';
 import ShareableGraphView from './views/ShareableGraphView';
 
+// Dev-only design-system catalog; lazy so it is not in the main bundle
+const StyleGuideView = lazy(() => import('./views/StyleGuideView'));
+
 export default function App() {
+  const location = useLocation();
+  const showDevRoutes =
+    import.meta.env.DEV || new URLSearchParams(location.search).get('dev') === '1';
+
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white font-sans flex flex-col">
       {/* Header */}
@@ -27,6 +35,16 @@ export default function App() {
           <Route path="/" element={<LandingPageView />} />
           <Route path="/graph/:owner/:repo" element={<ShareableGraphView />} />
           <Route path="/graph/:owner/:repo/jobs/:jobId" element={<ShareableGraphView />} />
+          {showDevRoutes && (
+            <Route
+              path="/dev/ui"
+              element={
+                <Suspense fallback={null}>
+                  <StyleGuideView />
+                </Suspense>
+              }
+            />
+          )}
         </Routes>
       </main>
     </div>

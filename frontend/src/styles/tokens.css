@@ -1,0 +1,71 @@
+/*
+ * CodeGraph design tokens (v1, dark theme).
+ * See .ux-profile.md: monochrome chrome, colour only for data, WCAG 2.1 AA.
+ *
+ * Theme structure: every value lives on :root today. A light theme can be
+ * added later as a [data-theme="light"] block that redefines the same names.
+ * Contrast pairs are checked in src/styles/__tests__/tokens.contrast.test.js.
+ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces, L0 → L3 */
+  --cg-canvas: #0A0A0B;
+  --cg-raised: #111113;
+  --cg-overlay: #18181B;
+  --cg-hover: #1F1F23;
+
+  /* Borders. --cg-border is a decorative hairline (panels, dividers).
+     --cg-border-strong outlines controls and must reach 3:1 on every surface,
+     so it is 0.36 (0.14 measured 1.42:1 on canvas). */
+  --cg-border: rgba(255, 255, 255, 0.08);
+  --cg-border-strong: rgba(255, 255, 255, 0.36);
+
+  /* Text */
+  --cg-text: #EDEDEF;
+  --cg-text-secondary: #A1A1AA;
+  --cg-text-tertiary: #8B8B94;
+
+  /* Primary action (monochrome) */
+  --cg-primary: #EDEDEF;
+  --cg-primary-hover: #FFFFFF;
+  --cg-on-primary: #0A0A0B;
+
+  /* Focus ring */
+  --cg-focus: rgba(237, 237, 239, 0.6);
+
+  /* Data palette: colour is used ONLY for data */
+  --cg-node-file: #5B8DEF;
+  --cg-node-function: #9D8CF2;
+  --cg-node-class: #E5A54B;
+  --cg-node-entry: #4CB782;
+
+  /* Severity / status */
+  --cg-sev-high: #E5484D;
+  --cg-sev-med: #E5A54B;
+  --cg-sev-low: #8B8B94;
+  --cg-success: #4CB782;
+
+  /* Radii */
+  --cg-radius-control: 8px;
+  --cg-radius-panel: 12px;
+
+  /* Motion (opacity / transform only) */
+  --cg-dur-fast: 150ms;
+  --cg-dur-base: 200ms;
+  --cg-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Elevation: no drop shadows on dark; optional top edge highlight */
+  --cg-edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  /* Typography (fonts imported in main.jsx) */
+  --cg-font-sans: "Geist Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cg-font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --cg-dur-fast: 0ms;
+    --cg-dur-base: 0ms;
+  }
+}
