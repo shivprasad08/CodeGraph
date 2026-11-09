@@ -153,6 +153,10 @@ export default function NodePanel({ node, graph, onClose, onNodeClick }) {
                 <div className="text-sm text-white/90 leading-relaxed bg-surface-hover rounded-lg p-3 border border-border font-sans">
                   {node.summary}
                 </div>
+              ) : node.summary_status === 'skipped' ? (
+                <div className="text-xs text-muted italic">Summary not generated (only the 60 most-connected functions are summarized)</div>
+              ) : node.summary_status === 'failed' ? (
+                <div className="text-xs text-muted italic">Summary unavailable — AI provider busy</div>
               ) : (
                 <div className="text-xs text-muted italic">No summary available</div>
               )}

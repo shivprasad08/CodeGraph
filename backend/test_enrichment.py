@@ -15,6 +15,7 @@ from enrichment import (
     _enrich_file,
     enrich_graph,
     MAX_ITEMS_PER_FILE,
+    MistralRateLimitError,
 )
 from groq import RateLimitError
 
@@ -79,6 +80,28 @@ class TestBuildPrompt:
         nodes = [_make_node("f::foo", "foo", "function", "f.py")]
         prompt = _build_prompt("f.py", nodes)
         assert "docstring" not in prompt
+
+    def test_items_json_is_compact(self):
+        nodes = [
+            _make_node("f::foo", "foo", "function", "f.py"),
+            _make_node("f::Bar", "Bar", "class", "f.py"),
+        ]
+        prompt = _build_prompt("f.py", nodes)
+        items_line = prompt.split("Functions and classes to explain:\n")[1].split("\n")[0]
+
+        assert json.loads(items_line) == [
+            {"name": "foo", "type": "function"},
+            {"name": "Bar", "type": "class"},
+        ]
+        assert ", " not in items_line and ": " not in items_line
+        assert "start_line" not in prompt
+
+    def test_docstring_truncated(self):
+        node = _make_node("f::foo", "foo", "function", "f.py")
+        node["docstring"] = "x" * 500
+        prompt = _build_prompt("f.py", [node])
+        assert "x" * 200 in prompt
+        assert "x" * 201 not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +256,24 @@ class TestEnrichFile:
         assert result == {}
 
     @pytest.mark.asyncio
+    async def test_mistral_rate_limit_retried_once_then_empty(self):
+        nodes = [_make_node("f::foo", "foo", "function", "f.py")]
+
+        with patch(
+            "enrichment._call_groq", side_effect=RuntimeError("Groq down")
+        ), patch(
+            "enrichment._call_mistral", new_callable=AsyncMock
+        ) as mock_mistral, patch(
+            "enrichment.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            mock_mistral.side_effect = MistralRateLimitError("429")
+            result = await _enrich_file("f.py", nodes)
+
+        assert result == {}
+        assert mock_mistral.call_count == 2
+        mock_sleep.assert_awaited_once_with(2)
+
+    @pytest.mark.asyncio
     async def test_both_fail_returns_empty(self):
         nodes = [_make_node("f::foo", "foo", "function", "f.py")]
 
@@ -347,7 +388,7 @@ class TestEnrichGraph:
             _make_node("b.py::bar", "bar", "function", "b.py"),
         ]
 
-        async def _fake_enrich(file_path, nodes):
+        async def _fake_enrich(file_path, nodes, stats=None):
             if file_path == "a.py":
                 raise ValueError("boom")
             return {"bar": "Formats output."}
@@ -357,7 +398,45 @@ class TestEnrichGraph:
 
         by_label = {n["label"]: n for n in result["nodes"]}
         assert by_label["foo"]["summary"] == ""
+        assert by_label["foo"]["summary_status"] == "failed"
         assert by_label["bar"]["summary"] == "Formats output."
+        assert by_label["bar"]["summary_status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_only_top_degree_nodes_enriched(self):
+        # degrees: hub=4, mid=2, low=1, iso=0, ep=0 (entry point wins anyway)
+        nodes = [
+            _make_node("a.py::iso", "iso", "function", "a.py"),
+            _make_node("a.py::low", "low", "function", "a.py"),
+            _make_node("b.py::hub", "hub", "function", "b.py"),
+            _make_node("b.py::mid", "mid", "class", "b.py"),
+            _make_node("c.py::ep", "ep", "function", "c.py"),
+        ]
+        nodes[4]["is_entry_point"] = True
+        edges = [
+            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls"},
+            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls"},
+            {"source": "b.py::hub", "target": "x", "type": "calls"},
+            {"source": "a.py::low", "target": "b.py::hub", "type": "calls"},
+        ]
+        sent = []
+
+        async def _fake_enrich(file_path, file_nodes, stats=None):
+            sent.extend(n["label"] for n in file_nodes)
+            return {n["label"]: f"Summary of {n['label']}." for n in file_nodes}
+
+        with patch("config.MAX_ENRICH_NODES", 3), patch(
+            "enrichment._enrich_file", side_effect=_fake_enrich
+        ):
+            result = await enrich_graph(_make_graph(nodes=nodes, edges=edges))
+
+        assert sorted(sent) == ["ep", "hub", "mid"]
+        by_label = {n["label"]: n for n in result["nodes"]}
+        for label in ("ep", "hub", "mid"):
+            assert by_label[label]["summary_status"] == "ok"
+        for label in ("iso", "low"):
+            assert by_label[label]["summary_status"] == "skipped"
+            assert by_label[label]["summary"] == ""
 
 
 # ---------------------------------------------------------------------------
