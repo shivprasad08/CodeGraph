@@ -84,6 +84,44 @@ class TestBuildSystemPrompt:
         assert "def function_with_long_name_00" in prompt
 
 
+class TestReferencedNodes:
+    GRAPH = {"nodes": [
+        {"id": "src/auth.py::verify_token"},
+        {"id": "src/auth.py::TokenVerifier"},
+        {"id": "src/db.py::connect"},
+    ]}
+
+    def test_node_lines_with_bullets_and_whitespace(self):
+        text = (
+            "Answer.\n\nReferences:\n"
+            "NODE: src/auth.py::verify_token\n"
+            "- NODE: src/db.py::connect\n"
+            "  * NODE: `src/auth.py::TokenVerifier`\n"
+            "NODE: src/missing.py::nope\n"
+        )
+        assert chat._referenced_nodes(text, self.GRAPH) == [
+            "src/auth.py::verify_token",
+            "src/db.py::connect",
+            "src/auth.py::TokenVerifier",
+        ]
+
+    def test_backticked_ids_anywhere_in_order_and_deduped(self):
+        text = (
+            "`src/db.py::connect` opens the pool; `src/auth.py::verify_token` "
+            "checks tokens via `src/db.py::connect`. `src/fake.py::ghost` is "
+            "not real, nor is `connect`.\nNODE: src/auth.py::verify_token"
+        )
+        assert chat._referenced_nodes(text, self.GRAPH) == [
+            "src/db.py::connect",
+            "src/auth.py::verify_token",
+        ]
+
+    def test_capped_at_ten(self):
+        graph = {"nodes": [{"id": f"m.py::f{i}"} for i in range(15)]}
+        text = " ".join(f"`m.py::f{i}`" for i in range(15))
+        assert chat._referenced_nodes(text, graph) == [f"m.py::f{i}" for i in range(10)]
+
+
 class TestStreamChatResponse:
     @pytest.mark.asyncio
     async def test_groq_rate_limit_falls_back_to_mistral(self):

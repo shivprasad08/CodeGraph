@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections import Counter
 from groq import AsyncGroq
 from mistralai.client.sdk import Mistral
@@ -198,16 +199,32 @@ async def _mistral_tokens(messages: list[dict]):
             yield token
 
 
+MAX_REFERENCED_NODES = 10
+
+# "NODE: <id>" lines (optionally prefixed by "-", "*" or whitespace), or
+# backticked ids like `src/auth.py::verify_token` anywhere in the text.
+_NODE_REF_RE = re.compile(
+    r"^[ \t*-]*NODE:[ \t]*(?P<line>[^\n]+?)[ \t]*$"
+    r"|`(?P<tick>[^`\s]+\.py::[^`\s]+)`",
+    re.MULTILINE,
+)
+
+
 def _referenced_nodes(full_response: str, graph: dict) -> list[str]:
-    """Parses NODE: references, keeping only ids that exist in the graph."""
+    """
+    Parses node references in order of appearance, keeping only ids that
+    exist in the graph. Deduped and capped at MAX_REFERENCED_NODES.
+    """
     node_ids = {n["id"] for n in graph.get("nodes", [])}
     referenced = []
-    for line in full_response.split("\n"):
-        line = line.strip()
-        if line.startswith("NODE:"):
-            node_id = line[5:].strip()
-            if node_id in node_ids:
-                referenced.append(node_id)
+    seen = set()
+    for match in _NODE_REF_RE.finditer(full_response):
+        node_id = (match.group("line") or match.group("tick")).strip(" \t\r`")
+        if node_id in node_ids and node_id not in seen:
+            seen.add(node_id)
+            referenced.append(node_id)
+            if len(referenced) >= MAX_REFERENCED_NODES:
+                break
     return referenced
 
 
