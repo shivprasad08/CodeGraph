@@ -33,6 +33,8 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 MISTRAL_MODEL = "mistral-small-latest"
 
 MAX_ITEMS_PER_FILE = 25
+LLM_TIMEOUT_S = 30
+MAX_CONCURRENT_FILES = 4
 
 SYSTEM_PROMPT = (
     "You are a senior software engineer explaining code to a new team member.\n"
@@ -208,35 +210,31 @@ async def _enrich_file(file_path: str, nodes: list[dict]) -> dict:
 
     prompt = _build_prompt(file_path, nodes)
 
-    # Try Groq first
+    # Try Groq first. Groq rate limits are per-account, so on a 429, timeout
+    # or other error go straight to Mistral instead of waiting and retrying.
     try:
         print(f"[enrichment] Using Groq for {file_path}")
-        raw = await _call_groq(prompt, SYSTEM_PROMPT)
+        raw = await asyncio.wait_for(
+            _call_groq(prompt, SYSTEM_PROMPT), timeout=LLM_TIMEOUT_S
+        )
         return _parse_llm_response(raw, file_path)
     except RateLimitError:
-        # 429: wait 60 seconds, retry once on Groq
-        print(f"[enrichment] Groq rate limited, waiting 60s before retry...")
-        await asyncio.sleep(60)
-        try:
-            raw = await _call_groq(prompt, SYSTEM_PROMPT)
-            return _parse_llm_response(raw, file_path)
-        except RateLimitError:
-            # Still rate limited: fall through to Mistral
-            print(
-                f"[enrichment] Groq rate limited, switching to Mistral "
-                f"for {file_path}"
-            )
-        except Exception as e:
-            print(f"[enrichment] Groq retry failed: {e}, trying Mistral")
+        print(f"[enrichment] Groq rate limited, trying Mistral for {file_path}")
+    except asyncio.TimeoutError:
+        print(f"[enrichment] Groq timed out, trying Mistral for {file_path}")
     except RuntimeError as e:
-        # Any other Groq error: immediately try Mistral
         print(f"[enrichment] Groq error: {e}, trying Mistral for {file_path}")
 
-    # Mistral fallback
+    # Mistral fallback (best-effort)
     try:
         print(f"[enrichment] Using Mistral for {file_path}")
-        raw = await _call_mistral(prompt, SYSTEM_PROMPT)
+        raw = await asyncio.wait_for(
+            _call_mistral(prompt, SYSTEM_PROMPT), timeout=LLM_TIMEOUT_S
+        )
         return _parse_llm_response(raw, file_path)
+    except asyncio.TimeoutError:
+        print(f"[enrichment] Mistral timed out for {file_path}")
+        return {}
     except Exception as e:
         print(f"[enrichment] Mistral also failed for {file_path}: {e}")
         return {}
@@ -245,11 +243,12 @@ async def _enrich_file(file_path: str, nodes: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
-async def enrich_graph(graph: dict) -> dict:
+async def enrich_graph(graph: dict, on_progress=None) -> dict:
     """
     Takes the full graph dict from build_graph().
     Returns the same dict with summary fields filled in.
     Does NOT mutate the input — makes a deep copy first.
+    Calls on_progress(done, total) after each file finishes, if provided.
     """
     graph = copy.deepcopy(graph)
 
@@ -265,19 +264,31 @@ async def enrich_graph(graph: dict) -> dict:
 
     # Collect all summaries: { file_path: { name: summary } }
     all_summaries: dict[str, dict[str, str]] = {}
-    enriched = 0
+    done = 0
+    sem = asyncio.Semaphore(MAX_CONCURRENT_FILES)
 
-    for i, (file_path, nodes) in enumerate(file_groups.items(), start=1):
-        print(f"[enrichment] Processing file {i}/{total}: {file_path}")
-
-        summaries = await _enrich_file(file_path, nodes)
+    async def _process(file_path: str, nodes: list[dict]) -> None:
+        nonlocal done
+        async with sem:
+            print(f"[enrichment] Processing file: {file_path}")
+            try:
+                summaries = await _enrich_file(file_path, nodes)
+            except Exception as e:
+                print(f"[enrichment] Unexpected error for {file_path}: {e}")
+                summaries = {}
         if summaries:
             all_summaries[file_path] = summaries
-            enriched += 1
+        done += 1
+        if on_progress is not None:
+            try:
+                on_progress(done, total)
+            except Exception as e:
+                print(f"[enrichment] on_progress callback failed: {e}")
 
-        # 2-second delay between calls to stay under rate limits
-        if i < total:
-            await asyncio.sleep(2)
+    await asyncio.gather(
+        *(_process(fp, nodes) for fp, nodes in file_groups.items())
+    )
+    enriched = len(all_summaries)
 
     # Merge summaries back onto graph nodes
     for node in graph["nodes"]:

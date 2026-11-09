@@ -128,7 +128,7 @@ async def fetch_repo(repo_url: str) -> dict:
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     
-    async with httpx.AsyncClient(headers=headers) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
         branch, sha = await _get_default_branch_and_sha(owner, repo, client)
         files = await _get_python_files(owner, repo, sha, client)
         file_contents = await _fetch_file_contents(owner, repo, sha, files, client)

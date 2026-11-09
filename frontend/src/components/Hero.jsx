@@ -289,7 +289,7 @@ function Hero({ onAnalyze }) {
           {/* Example pills */}
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
             <span className="text-xs text-white/30 font-mono">Try:</span>
-            {['psf/requests', 'pallets/flask', 'encode/starlette', 'tiangolo/fastapi'].map(ex => (
+            {['psf/requests', 'pallets/flask', 'encode/starlette', 'fastapi/fastapi'].map(ex => (
               <button
                 key={ex}
                 onClick={() => {

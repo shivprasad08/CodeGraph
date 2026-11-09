@@ -1,6 +1,7 @@
 # What it does: Tests for the LLM enrichment module
 # Module 4: Enrichment Tests
 
+import asyncio
 import json
 import copy
 import pytest
@@ -182,7 +183,7 @@ class TestEnrichFile:
             "enrichment._call_mistral", new_callable=AsyncMock
         ) as mock_mistral, patch(
             "enrichment.asyncio.sleep", new_callable=AsyncMock
-        ):
+        ) as mock_sleep:
             # Groq always raises RateLimitError
             mock_groq.side_effect = RateLimitError(
                 message="rate limited",
@@ -194,7 +195,42 @@ class TestEnrichFile:
             result = await _enrich_file("f.py", nodes)
 
         assert result == {"foo": "Handles auth."}
+        mock_groq.assert_called_once()
         mock_mistral.assert_called_once()
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_groq_timeout_falls_to_mistral(self):
+        nodes = [_make_node("f::foo", "foo", "function", "f.py")]
+        mock_response = json.dumps({"foo": "Handles auth."})
+
+        async def _hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        with patch("enrichment.LLM_TIMEOUT_S", 0.05), patch(
+            "enrichment._call_groq", side_effect=_hang
+        ), patch(
+            "enrichment._call_mistral", new_callable=AsyncMock
+        ) as mock_mistral:
+            mock_mistral.return_value = mock_response
+            result = await _enrich_file("f.py", nodes)
+
+        assert result == {"foo": "Handles auth."}
+        mock_mistral.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_mistral_timeout_returns_empty(self):
+        nodes = [_make_node("f::foo", "foo", "function", "f.py")]
+
+        async def _hang(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        with patch("enrichment.LLM_TIMEOUT_S", 0.05), patch(
+            "enrichment._call_groq", side_effect=RuntimeError("Groq down")
+        ), patch("enrichment._call_mistral", side_effect=_hang):
+            result = await _enrich_file("f.py", nodes)
+
+        assert result == {}
 
     @pytest.mark.asyncio
     async def test_both_fail_returns_empty(self):
@@ -283,6 +319,45 @@ class TestEnrichGraph:
 
         file_node = next(n for n in result["nodes"] if n["type"] == "file")
         assert file_node["summary"] == ""
+
+    @pytest.mark.asyncio
+    async def test_on_progress_called_once_per_file(self):
+        nodes = [
+            _make_node(f"f{i}.py::foo", "foo", "function", f"f{i}.py")
+            for i in range(5)
+        ]
+        calls = []
+
+        with patch(
+            "enrichment._call_groq", new_callable=AsyncMock
+        ) as mock_groq:
+            mock_groq.return_value = json.dumps({"foo": "Does something."})
+            result = await enrich_graph(
+                _make_graph(nodes=nodes),
+                on_progress=lambda done, total: calls.append((done, total)),
+            )
+
+        assert calls == [(i, 5) for i in range(1, 6)]
+        assert all(n["summary"] == "Does something." for n in result["nodes"])
+
+    @pytest.mark.asyncio
+    async def test_one_file_failure_does_not_kill_job(self):
+        nodes = [
+            _make_node("a.py::foo", "foo", "function", "a.py"),
+            _make_node("b.py::bar", "bar", "function", "b.py"),
+        ]
+
+        async def _fake_enrich(file_path, nodes):
+            if file_path == "a.py":
+                raise ValueError("boom")
+            return {"bar": "Formats output."}
+
+        with patch("enrichment._enrich_file", side_effect=_fake_enrich):
+            result = await enrich_graph(_make_graph(nodes=nodes))
+
+        by_label = {n["label"]: n for n in result["nodes"]}
+        assert by_label["foo"]["summary"] == ""
+        assert by_label["bar"]["summary"] == "Formats output."
 
 
 # ---------------------------------------------------------------------------

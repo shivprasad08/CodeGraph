@@ -210,7 +210,13 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
             "message": "Generating explanations..."
         })
         try:
-            graph = await enrichment.enrich_graph(graph)
+            def _on_enrich_progress(done: int, total: int) -> None:
+                job.update({
+                    "progress": 70 + int(20 * done / max(total, 1)),
+                    "message": f"Summarizing files {done}/{total}...",
+                })
+
+            graph = await enrichment.enrich_graph(graph, on_progress=_on_enrich_progress)
         except Exception as e:
             logger.warning(f"Enrichment failed (non-fatal) for {repo}: {e}")
             # Non-fatal, continue with un-enriched graph
