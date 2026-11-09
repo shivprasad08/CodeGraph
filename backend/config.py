@@ -12,7 +12,7 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 MAX_FILES = int(os.getenv("MAX_FILES", 60))
 CACHE_DIR = os.getenv("CACHE_DIR", "./cache")
 MAX_ENRICH_NODES = int(os.getenv("MAX_ENRICH_NODES", 60))
-GROQ_SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "llama-3.1-8b-instant")
+GROQ_SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "openai/gpt-oss-20b")
 GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 

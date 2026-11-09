@@ -165,12 +165,24 @@ async def _groq_tokens(messages: list[dict]):
         messages=messages,
         max_tokens=CHAT_MAX_TOKENS,
         temperature=0.3,    # low temperature = more factual, less creative
-        stream=True
+        stream=True,
+        # gpt-oss models reason first; keep reasoning from eating max_tokens.
+        # Sent via extra_body (groq SDK 0.9.0 has no reasoning_effort kwarg),
+        # and only for gpt-oss, since other models reject the parameter.
+        **(
+            {"extra_body": {"reasoning_effort": "low"}}
+            if "gpt-oss" in GROQ_CHAT_MODEL
+            else {}
+        ),
     )
+    got_content = False
     async for chunk in stream:
         token = chunk.choices[0].delta.content or ""
         if token:
+            got_content = True
             yield token
+    if not got_content:
+        raise RuntimeError("Groq returned empty content")
 
 
 async def _mistral_tokens(messages: list[dict]):

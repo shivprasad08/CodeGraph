@@ -102,6 +102,33 @@ class TestStreamChatResponse:
         mistral.chat.stream_async.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_groq_empty_content_falls_back_to_mistral(self):
+        graph = {"repo": "o/r", "nodes": [], "edges": []}
+
+        async def _empty_stream():
+            for _ in range(3):
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=None))]
+                )
+
+        groq = MagicMock()
+        groq.chat.completions.create = AsyncMock(return_value=_empty_stream())
+        mistral = _mistral_client(["From Mistral."])
+
+        with patch.object(chat, "groq_client", groq), \
+             patch.object(chat, "GROQ_CHAT_MODEL", "openai/gpt-oss-120b"), \
+             patch.object(chat, "mistral_client", mistral):
+            events = _events(await _collect(
+                chat.stream_chat_response("o/r", graph, "hi", [])
+            ))
+
+        assert events[0] == {"token": "From Mistral.", "done": False}
+        assert events[-1] == {"token": "", "done": True, "nodes": []}
+        mistral.chat.stream_async.assert_awaited_once()
+        kwargs = groq.chat.completions.create.call_args.kwargs
+        assert kwargs["extra_body"] == {"reasoning_effort": "low"}
+
+    @pytest.mark.asyncio
     async def test_both_fail_sends_friendly_message(self):
         graph = {"repo": "o/r", "nodes": [], "edges": []}
         mistral = MagicMock()

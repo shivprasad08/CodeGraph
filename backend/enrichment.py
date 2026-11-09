@@ -207,8 +207,19 @@ async def _call_groq(prompt: str, system: str) -> str:
             ],
             temperature=0.2,
             max_tokens=MAX_TOKENS,
+            # gpt-oss models reason first; keep reasoning from eating max_tokens.
+            # Sent via extra_body (groq SDK 0.9.0 has no reasoning_effort kwarg),
+            # and only for gpt-oss, since other models reject the parameter.
+            **(
+                {"extra_body": {"reasoning_effort": "low"}}
+                if "gpt-oss" in config.GROQ_SUMMARY_MODEL
+                else {}
+            ),
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        if not content or not content.strip():
+            raise RuntimeError("Groq returned empty content")
+        return content
     except RateLimitError:
         raise
     except Exception as e:

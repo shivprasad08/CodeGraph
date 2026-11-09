@@ -6,6 +6,7 @@ import json
 import copy
 import pytest
 import pytest_asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from enrichment import (
@@ -254,6 +255,28 @@ class TestEnrichFile:
             result = await _enrich_file("f.py", nodes)
 
         assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_groq_empty_content_falls_to_mistral(self):
+        nodes = [_make_node("f::foo", "foo", "function", "f.py")]
+        groq = MagicMock()
+        groq.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None))]
+        ))
+
+        with patch("enrichment.groq_client", groq), patch(
+            "config.GROQ_SUMMARY_MODEL", "openai/gpt-oss-20b"
+        ), patch(
+            "enrichment._call_mistral", new_callable=AsyncMock
+        ) as mock_mistral:
+            mock_mistral.return_value = json.dumps({"foo": "Handles auth."})
+            result = await _enrich_file("f.py", nodes)
+
+        assert result == {"foo": "Handles auth."}
+        mock_mistral.assert_called_once()
+        kwargs = groq.chat.completions.create.call_args.kwargs
+        assert kwargs["model"] == "openai/gpt-oss-20b"
+        assert kwargs["extra_body"] == {"reasoning_effort": "low"}
 
     @pytest.mark.asyncio
     async def test_mistral_rate_limit_retried_once_then_empty(self):
