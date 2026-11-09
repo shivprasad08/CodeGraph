@@ -39,6 +39,15 @@
   --cg-node-function: #9D8CF2;
   --cg-node-class: #E5A54B;
   --cg-node-entry: #4CB782;
+  /* Cluster palette (graph hulls, file tree, diagram module dots) */
+  --cg-cluster-1: #9d5ff0;
+  --cg-cluster-2: #60a5fa;
+  --cg-cluster-3: #4ade80;
+  --cg-cluster-4: #fbbf24;
+  --cg-cluster-5: #f472b6;
+  --cg-cluster-6: #2dd4bf;
+  --cg-cluster-7: #f87171;
+  --cg-cluster-8: #818cf8;
 
   /* Severity / status */
   --cg-sev-high: #E5484D;

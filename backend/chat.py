@@ -66,7 +66,7 @@ def build_system_prompt(job_id: str, graph: dict) -> str:
         for c in children[:MAX_CHILDREN_PER_FILE]:
             summary = f" — {c['summary']}" if c.get("summary") else ""
             prefix = "def" if c["type"] == "function" else "class"
-            child_lines.append(f"    {prefix} {c['label']}{summary}")
+            child_lines.append(f"    {prefix} {c.get('qualified_name') or c['label']}{summary}")
         if len(children) > MAX_CHILDREN_PER_FILE:
             child_lines.append(f"    ...and {len(children) - MAX_CHILDREN_PER_FILE} more")
         weight = degrees[path] + sum(degrees[c["id"]] for c in children)

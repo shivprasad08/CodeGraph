@@ -59,7 +59,7 @@ def _build_prompt(file_path: str, nodes: list[dict]) -> str:
     items = []
     for node in nodes:
         item = {
-            "name": node.get("label", node.get("name", "")),
+            "name": _summary_key(node),
             "type": node.get("type", "function"),
         }
         # Include parameters if present (functions have them in the id or
@@ -131,30 +131,49 @@ def _parse_llm_response(raw: str, file_path: str) -> dict:
 # ---------------------------------------------------------------------------
 # Node budget: pick the most-connected function/class nodes
 # ---------------------------------------------------------------------------
-def _node_degrees(edges: list[dict]) -> Counter:
-    """Counts the edges where each node id is the source or the target."""
+CONFIDENCE_WEIGHT = {"exact": 1.0, "inferred": 0.5}
+
+
+def _call_degrees(edges: list[dict]) -> Counter:
+    """
+    Resolved call degree per node (in + out). Exact call edges count 1.0,
+    inferred ones 0.5; imports/defines do not count.
+    """
     degrees: Counter = Counter()
     for edge in edges:
-        degrees[edge.get("source")] += 1
-        degrees[edge.get("target")] += 1
+        if edge.get("type") != "calls":
+            continue
+        weight = CONFIDENCE_WEIGHT.get(edge.get("confidence", "exact"), 1.0)
+        degrees[edge.get("source")] += weight
+        degrees[edge.get("target")] += weight
     return degrees
+
+
+def _is_summarizable(node: dict) -> bool:
+    """Functions and classes, except dunder methods (__init__ is kept)."""
+    if node.get("type") not in ("function", "class"):
+        return False
+    label = node.get("label", "")
+    return label == "__init__" or not (label.startswith("__") and label.endswith("__"))
 
 
 def _select_nodes_for_enrichment(graph: dict, limit: int) -> set[str]:
     """
-    Returns the ids of the top `limit` function/class nodes: entry points
-    first, then by degree (ties keep graph order).
+    Returns the ids of the top `limit` function/class nodes by resolved call
+    degree; entry points only break ties (then graph order).
     """
-    degrees = _node_degrees(graph.get("edges", []))
-    candidates = [
-        n for n in graph.get("nodes", [])
-        if n.get("type") in ("function", "class")
-    ]
+    degrees = _call_degrees(graph.get("edges", []))
+    candidates = [n for n in graph.get("nodes", []) if _is_summarizable(n)]
     ranked = sorted(
         candidates,
-        key=lambda n: (not n.get("is_entry_point"), -degrees[n.get("id")]),
+        key=lambda n: (-degrees[n.get("id")], not n.get("is_entry_point")),
     )
     return {n.get("id") for n in ranked[:max(limit, 0)]}
+
+
+def _summary_key(node: dict) -> str:
+    """Name the model sees and answers with: qualified (Class.method) so same-named methods stay apart."""
+    return node.get("qualified_name") or node.get("label", node.get("name", ""))
 
 
 def _error_details(e: Exception) -> str:
@@ -383,12 +402,12 @@ async def enrich_graph(graph: dict, on_progress=None) -> dict:
         if node.get("type") not in ("function", "class"):
             continue
         file_path = node.get("file", "")
-        label = node.get("label", "")
+        key = _summary_key(node)
         file_summaries = all_summaries.get(file_path, {})
-        if label in file_summaries:
-            node["summary"] = file_summaries[label]
+        if key in file_summaries:
+            node["summary"] = file_summaries[key]
         if node.get("id") in selected:
-            node["summary_status"] = "ok" if label in file_summaries else "failed"
+            node["summary_status"] = "ok" if key in file_summaries else "failed"
 
     ok = sum(1 for n in graph["nodes"] if n.get("summary_status") == "ok")
     failed = sum(1 for n in graph["nodes"] if n.get("summary_status") == "failed")

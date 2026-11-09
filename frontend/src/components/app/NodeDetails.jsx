@@ -14,7 +14,7 @@ export const typeKey = (node) => (node.is_entry_point && node.type !== 'file' ? 
 
 const LIST_LIMIT = 8;
 
-function NodeList({ title, nodes, emptyText, onSelect }) {
+function NodeList({ title, nodes, emptyText, onSelect, inferred = new Set() }) {
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? nodes : nodes.slice(0, LIST_LIMIT);
   return (
@@ -40,6 +40,11 @@ function NodeList({ title, nodes, emptyText, onSelect }) {
               >
                 <span aria-hidden="true" className={cn('h-1.5 w-1.5 shrink-0 rounded-full', TYPE_DOT[typeKey(n)])} />
                 <span className="min-w-0 flex-1 truncate">{n.label}</span>
+                {inferred.has(n.id) && (
+                  <span className="shrink-0 text-cg-xs text-cg-tertiary" title="Linked by name: the receiver type is unknown, and only one function in the repo has this name">
+                    inferred
+                  </span>
+                )}
                 <span className="max-w-[45%] shrink-0 truncate text-cg-xs text-cg-tertiary">{n.file?.split('/').pop()}</span>
               </button>
             </li>
@@ -65,18 +70,27 @@ function NodeList({ title, nodes, emptyText, onSelect }) {
 export default function NodeDetails({ node, graph, onSelectNode, onViewSource, onSimulate, onOpenSearch }) {
   const byId = useMemo(() => new Map((graph?.nodes ?? []).map((n) => [n.id, n])), [graph]);
 
-  const { callers, callees } = useMemo(() => {
-    if (!node) return { callers: [], callees: [] };
+  const { callers, callees, inferredCallers, inferredCallees } = useMemo(() => {
+    const inferredCallersOut = new Set();
+    const inferredCalleesOut = new Set();
+    if (!node) return { callers: [], callees: [], inferredCallers: inferredCallersOut, inferredCallees: inferredCalleesOut };
     const callersOut = [];
     const calleesOut = [];
     for (const e of graph?.edges ?? []) {
       if (e.type !== 'calls') continue;
       const s = typeof e.source === 'object' ? e.source.id : e.source;
       const t = typeof e.target === 'object' ? e.target.id : e.target;
-      if (t === node.id && byId.has(s)) callersOut.push(byId.get(s));
-      if (s === node.id && byId.has(t)) calleesOut.push(byId.get(t));
+      const inferred = e.confidence === 'inferred';
+      if (t === node.id && byId.has(s)) {
+        callersOut.push(byId.get(s));
+        if (inferred) inferredCallersOut.add(s);
+      }
+      if (s === node.id && byId.has(t)) {
+        calleesOut.push(byId.get(t));
+        if (inferred) inferredCalleesOut.add(t);
+      }
     }
-    return { callers: callersOut, callees: calleesOut };
+    return { callers: callersOut, callees: calleesOut, inferredCallers: inferredCallersOut, inferredCallees: inferredCalleesOut };
   }, [node, graph, byId]);
 
   if (!node) {
@@ -152,8 +166,8 @@ export default function NodeDetails({ node, graph, onSelectNode, onViewSource, o
 
       {!isFile && (
         <>
-          <NodeList title="Callers" nodes={callers} emptyText="Nothing in this repo calls it." onSelect={onSelectNode} />
-          <NodeList title="Callees" nodes={callees} emptyText="It doesn't call other functions in this repo." onSelect={onSelectNode} />
+          <NodeList title="Callers" nodes={callers} inferred={inferredCallers} emptyText="Nothing in this repo calls it." onSelect={onSelectNode} />
+          <NodeList title="Callees" nodes={callees} inferred={inferredCallees} emptyText="It doesn't call other functions in this repo." onSelect={onSelectNode} />
         </>
       )}
 

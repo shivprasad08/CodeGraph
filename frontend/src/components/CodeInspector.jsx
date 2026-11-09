@@ -143,11 +143,15 @@ export default function CodeInspector({
       }
     }
 
+    // Same-named methods (A.get, B.get) share a label: on its def line, a node claims the name first
+    const definedOn = {};
+    for (const n of fileNodes) if (n.type !== 'file' && n.lines) (definedOn[n.lines[0]] ??= []).push(n);
+
     return lines.map((htmlStr, idx) => {
       const lineNum = idx + 1;
       let html = htmlStr;
       // Clickable function/class names
-      for (const node of fileNodes) {
+      for (const node of definedOn[lineNum] ? [...definedOn[lineNum], ...fileNodes] : fileNodes) {
         if (node.type === 'file') continue;
         const label = node.label || node.id.split('::').pop();
         if (!label) continue;

@@ -40,3 +40,23 @@
 .cg-flow .react-flow__edge-textbg {
   rx: 4;
 }
+/* Hover/selection focus: everything not connected to the active module fades */
+.cg-flow .react-flow__node,
+.cg-flow .react-flow__edge {
+  transition: opacity var(--cg-dur-fast) var(--cg-ease);
+}
+.cg-flow .cg-flow-dim {
+  opacity: 0.25;
+}
+.cg-flow .react-flow__edge:focus {
+  outline: none;
+}
+.cg-flow .react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--cg-text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cg-flow .react-flow__node,
+  .cg-flow .react-flow__edge {
+    transition: none;
+  }
+}

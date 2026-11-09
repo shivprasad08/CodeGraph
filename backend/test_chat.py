@@ -83,6 +83,21 @@ class TestBuildSystemPrompt:
         # The highest-degree child (the caller of all others) is listed
         assert "def function_with_long_name_00" in prompt
 
+    def test_methods_listed_by_qualified_name(self):
+        # Ids are path::Class.method, so the model must see Class.method to cite them
+        graph = {"repo": "o/r", "nodes": [
+            {"id": "m.py", "type": "file", "label": "m.py"},
+            {"id": "m.py::A.get", "type": "function", "label": "get", "qualified_name": "A.get", "file": "m.py"},
+            {"id": "m.py::B.get", "type": "function", "label": "get", "qualified_name": "B.get", "file": "m.py"},
+        ], "edges": []}
+        prompt = chat.build_system_prompt("o/r", graph)
+        assert "def A.get" in prompt and "def B.get" in prompt
+
+    def test_qualified_method_ids_are_referenced(self):
+        graph = {"nodes": [{"id": "src/store.py::Store.get"}]}
+        text = "It reads via `src/store.py::Store.get`.\nNODE: src/store.py::Store.get\n"
+        assert chat._referenced_nodes(text, graph) == ["src/store.py::Store.get"]
+
 
 class TestReferencedNodes:
     GRAPH = {"nodes": [

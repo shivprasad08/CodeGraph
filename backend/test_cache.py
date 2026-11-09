@@ -4,6 +4,7 @@
 import json
 import time
 import pytest
+from graph_builder import GRAPH_SCHEMA_VERSION
 from unittest.mock import patch
 
 import cache
@@ -47,12 +48,12 @@ def _minimal_graph(repo="owner/repo", sha="abc12345"):
 class TestMakeCacheKey:
     def test_basic(self):
         key = _make_cache_key("owner/repo", "abc12345")
-        assert key == "owner__repo__abc12345.json"
+        assert key == f"owner__repo__abc12345__g{GRAPH_SCHEMA_VERSION}.json"
 
     def test_uppercase_lowered(self):
         key = _make_cache_key("Owner/Repo", "ABC12345")
         # repo is lowered, sha is also sanitized
-        assert key == "owner__repo__ABC12345.json"
+        assert key == f"owner__repo__ABC12345__g{GRAPH_SCHEMA_VERSION}.json"
 
     def test_special_chars_replaced(self):
         key = _make_cache_key("my.org/some+repo!", "sha@1")
@@ -62,7 +63,7 @@ class TestMakeCacheKey:
         assert "@" not in key
         assert key.endswith(".json")
         # All special chars should be underscores
-        assert "my_org__some_repo___sha_1.json" == key
+        assert f"my_org__some_repo___sha_1__g{GRAPH_SCHEMA_VERSION}.json" == key
 
 
 # ---------------------------------------------------------------------------

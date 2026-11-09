@@ -2,8 +2,19 @@
 # Module 2: Parser
 #
 # Takes the dict returned by ingestion.py's fetch_repo() and extracts
-# functions, classes, imports, and call sites from each Python file
-# using tree-sitter queries. Output feeds into Module 3 (graph_builder.py).
+# functions, classes, imports, and call sites from each Python file.
+# Output feeds into Module 3 (graph_builder.py).
+#
+# Every definition gets a qualified name that reflects where it lives:
+#   function           path::func
+#   method             path::Class.method
+#   nested class       path::Outer.Inner
+#   nested function    path::outer.inner
+# Call sites record the qualified id of their caller, the enclosing class
+# (for self/cls resolution) and a structured description of the receiver,
+# so the graph builder can resolve calls without guessing by name.
+
+import re
 
 from tree_sitter import Language, Parser
 import tree_sitter_python as tspython
@@ -14,33 +25,12 @@ import tree_sitter_python as tspython
 PY_LANGUAGE = Language(tspython.language())
 PARSER = Parser(PY_LANGUAGE)
 
-# ---------------------------------------------------------------------------
-# Precompiled tree-sitter queries
-# ---------------------------------------------------------------------------
-FUNCTION_QUERY = PY_LANGUAGE.query("""
-  (function_definition
-    name: (identifier) @func.name
-    parameters: (parameters) @func.params
-    body: (block) @func.body) @func.def
-""")
+MAX_CALLEE_TEXT = 200
+_MAIN_GUARD_RE = re.compile(r"""^\s*(__name__\s*==\s*['"]__main__['"]|['"]__main__['"]\s*==\s*__name__)\s*$""")
 
-CLASS_QUERY = PY_LANGUAGE.query("""
-  (class_definition
-    name: (identifier) @class.name
-    body: (block) @class.body) @class.def
-""")
 
-IMPORT_QUERY = PY_LANGUAGE.query("""
-  (import_statement) @import
-  (import_from_statement) @import_from
-""")
-
-CALL_QUERY = PY_LANGUAGE.query("""
-  (call function: [
-    (identifier) @call.name
-    (attribute object: (_) @call.obj attribute: (identifier) @call.attr)
-  ])
-""")
+def _text(node) -> str:
+    return node.text.decode("utf-8", errors="replace") if node is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -71,320 +61,286 @@ def _get_docstring(body_node, source_bytes: bytes) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Enclosing function finder (walks up the tree)
+# Small AST helpers
 # ---------------------------------------------------------------------------
-def _get_enclosing_function(node, tree) -> str:
-    """Walk up the tree from a call node to find its enclosing function name."""
-    current = node.parent
-    while current is not None:
-        if current.type == "function_definition":
-            name_node = current.child_by_field_name("name")
-            if name_node:
-                return name_node.text.decode("utf-8", errors="replace")
-        current = current.parent
-    return "__module__"
+def _is_dotted(node) -> bool:
+    """identifier, or attribute chain of identifiers (a.b.c)."""
+    if node is None:
+        return False
+    if node.type == "identifier":
+        return True
+    if node.type == "attribute":
+        return _is_dotted(node.child_by_field_name("object")) and node.child_by_field_name("attribute") is not None
+    return False
 
 
-# ---------------------------------------------------------------------------
-# Extraction: Functions
-# ---------------------------------------------------------------------------
-def _extract_functions(tree, source_bytes: bytes, path: str) -> list[dict]:
-    """Extract all function definitions from the parsed tree."""
-    matches = FUNCTION_QUERY.matches(tree.root_node)
+def _parameters(params_node) -> list[str]:
+    parameters = []
+    if params_node is None:
+        return parameters
+    for child in params_node.children:
+        name_child = None
+        if child.type == "identifier":
+            name_child = child
+        elif child.type in ("typed_parameter", "default_parameter", "typed_default_parameter"):
+            name_child = child.child_by_field_name("name")
+            if name_child is None:
+                name_child = next((sub for sub in child.children if sub.type == "identifier"), None)
+        if name_child is not None:
+            name = _text(name_child)
+            if name not in ("self", "cls"):
+                parameters.append(name)
+    return parameters
 
-    functions = []
-    for _pattern_idx, capture_dict in matches:
-        func_def_node = capture_dict.get("func.def")
-        func_name_node = capture_dict.get("func.name")
-        func_params_node = capture_dict.get("func.params")
-        func_body_node = capture_dict.get("func.body")
 
-        if not func_def_node or not func_name_node:
+def _decorators(def_node) -> list[str]:
+    """Decorator names as written: "app.get", "click.command", "staticmethod"…"""
+    names = []
+    parent = def_node.parent
+    if parent is None or parent.type != "decorated_definition":
+        return names
+    for child in parent.children:
+        if child.type != "decorator":
             continue
-
-        name = func_name_node.text.decode("utf-8", errors="replace")
-        start_line = func_def_node.start_point[0] + 1  # 1-indexed
-        end_line = func_def_node.end_point[0] + 1
-
-        # Extract parameters
-        parameters = []
-        if func_params_node:
-            for child in func_params_node.children:
-                if child.type == "identifier":
-                    param_name = child.text.decode("utf-8", errors="replace")
-                    if param_name not in ("self", "cls"):
-                        parameters.append(param_name)
-                elif child.type in ("typed_parameter", "default_parameter",
-                                     "typed_default_parameter"):
-                    # The name is the first identifier child or via field name
-                    name_child = child.child_by_field_name("name")
-                    if name_child is None:
-                        for sub in child.children:
-                            if sub.type == "identifier":
-                                name_child = sub
-                                break
-                    if name_child:
-                        param_name = name_child.text.decode("utf-8", errors="replace")
-                        if param_name not in ("self", "cls"):
-                            parameters.append(param_name)
-
-        # Determine if this function is a method
-        # In tree-sitter-python 0.21, the class body is a 'block' node
-        # whose parent is a 'class_definition'
-        is_method = False
-        parent = func_def_node.parent
-        if parent and parent.type == "block":
-            grandparent = parent.parent
-            if grandparent and grandparent.type == "class_definition":
-                is_method = True
-
-        # Extract decorator names
-        decorator_names = []
-        # Decorators wrap the function in a decorated_definition node
-        decorated_parent = func_def_node.parent
-        if decorated_parent and decorated_parent.type == "decorated_definition":
-            for child in decorated_parent.children:
-                if child.type == "decorator":
-                    for deco_child in child.children:
-                        if deco_child.type == "identifier":
-                            decorator_names.append(
-                                deco_child.text.decode("utf-8", errors="replace")
-                            )
-                        elif deco_child.type == "attribute":
-                            decorator_names.append(
-                                deco_child.text.decode("utf-8", errors="replace")
-                            )
-                        elif deco_child.type == "call":
-                            fn_node = deco_child.child_by_field_name("function")
-                            if fn_node:
-                                decorator_names.append(
-                                    fn_node.text.decode("utf-8", errors="replace")
-                                )
-
-        # Extract docstring
-        docstring = _get_docstring(func_body_node, source_bytes)
-
-        functions.append({
-            "id": f"{path}::{name}",
-            "name": name,
-            "type": "function",
-            "start_line": start_line,
-            "end_line": end_line,
-            "parameters": parameters,
-            "is_method": is_method,
-            "decorator_names": decorator_names,
-            "docstring": docstring,
-        })
-
-    return functions
+        for deco in child.children:
+            if deco.type in ("identifier", "attribute"):
+                names.append(_text(deco))
+            elif deco.type == "call":
+                fn = deco.child_by_field_name("function")
+                if fn is not None:
+                    names.append(_text(fn))
+    return names
 
 
-# ---------------------------------------------------------------------------
-# Extraction: Classes
-# ---------------------------------------------------------------------------
-def _extract_classes(tree, source_bytes: bytes, path: str) -> list[dict]:
-    """Extract all class definitions from the parsed tree."""
-    matches = CLASS_QUERY.matches(tree.root_node)
+def _describe_call(call_node) -> dict | None:
+    """
+    Structured description of what a call targets:
+      name      f()                       {"name": "f"}
+      self      self.m() / cls.m()        {"attr": "m", "receiver": "self"|"cls"}
+      super     super().m()               {"attr": "m"}
+      dotted    a.b.f()                   {"base": "a.b", "attr": "f"}
+      instance  Store().get()             {"ctor": "Store", "attr": "get"}
+      unknown   obj.m(), self.x.m(), "".join()  {"attr": "m"}
+    """
+    fn = call_node.child_by_field_name("function")
+    if fn is None:
+        return None
+    if fn.type == "identifier":
+        return {"kind": "name", "name": _text(fn)}
+    if fn.type != "attribute":
+        return None
+    obj = fn.child_by_field_name("object")
+    attr = _text(fn.child_by_field_name("attribute"))
+    if not attr:
+        return None
+    if obj is not None and obj.type == "identifier" and _text(obj) in ("self", "cls"):
+        return {"kind": "self", "receiver": _text(obj), "attr": attr}
+    if obj is not None and obj.type == "call":
+        inner = obj.child_by_field_name("function")
+        if inner is not None and inner.type == "identifier" and _text(inner) == "super":
+            return {"kind": "super", "attr": attr}
+        if _is_dotted(inner) and not _text(inner).startswith(("self.", "cls.")):
+            return {"kind": "instance", "ctor": _text(inner), "attr": attr}
+        return {"kind": "unknown", "attr": attr}
+    if _is_dotted(obj) and not _text(obj).startswith(("self.", "cls.")):
+        return {"kind": "dotted", "base": _text(obj), "attr": attr}
+    return {"kind": "unknown", "attr": attr}
 
-    classes = []
-    for _pattern_idx, capture_dict in matches:
-        class_def_node = capture_dict.get("class.def")
-        class_name_node = capture_dict.get("class.name")
-        class_body_node = capture_dict.get("class.body")
 
-        if not class_def_node or not class_name_node:
+def _parse_import_statement(node) -> list[dict]:
+    """import a.b  /  import a.b as c  /  import a, b"""
+    out = []
+    for child in node.children:
+        alias = None
+        if child.type == "dotted_name":
+            module = _text(child)
+        elif child.type == "aliased_import":
+            module = _text(child.child_by_field_name("name"))
+            alias = _text(child.child_by_field_name("alias")) or None
+        else:
             continue
-
-        name = class_name_node.text.decode("utf-8", errors="replace")
-        start_line = class_def_node.start_point[0] + 1
-        end_line = class_def_node.end_point[0] + 1
-
-        # Extract base classes from superclasses field (argument_list)
-        base_classes = []
-        superclasses_node = class_def_node.child_by_field_name("superclasses")
-        if superclasses_node:
-            for child in superclasses_node.children:
-                if child.type == "identifier":
-                    base_classes.append(
-                        child.text.decode("utf-8", errors="replace")
-                    )
-                elif child.type == "attribute":
-                    base_classes.append(
-                        child.text.decode("utf-8", errors="replace")
-                    )
-
-        # Extract method names defined inside this class body
-        method_names = []
-        if class_body_node:
-            for child in class_body_node.children:
-                if child.type == "function_definition":
-                    method_name_node = child.child_by_field_name("name")
-                    if method_name_node:
-                        method_names.append(
-                            method_name_node.text.decode("utf-8", errors="replace")
-                        )
-                elif child.type == "decorated_definition":
-                    for sub in child.children:
-                        if sub.type == "function_definition":
-                            method_name_node = sub.child_by_field_name("name")
-                            if method_name_node:
-                                method_names.append(
-                                    method_name_node.text.decode("utf-8", errors="replace")
-                                )
-
-        # Docstring
-        docstring = _get_docstring(class_body_node, source_bytes)
-
-        classes.append({
-            "id": f"{path}::{name}",
-            "name": name,
-            "type": "class",
-            "start_line": start_line,
-            "end_line": end_line,
-            "base_classes": base_classes,
-            "method_names": method_names,
-            "docstring": docstring,
-        })
-
-    return classes
-
-
-# ---------------------------------------------------------------------------
-# Extraction: Imports
-# ---------------------------------------------------------------------------
-def _extract_imports(tree, source_bytes: bytes) -> list[dict]:
-    """Extract all import and import-from statements."""
-    captures = IMPORT_QUERY.captures(tree.root_node)
-
-    imports = []
-    seen_nodes = set()  # Deduplicate by node id
-
-    for node, capture_name in captures:
-        if id(node) in seen_nodes:
-            continue
-        seen_nodes.add(id(node))
-
-        if capture_name == "import":
-            # Plain: import os  /  import os, sys  /  import os.path
-            for child in node.children:
-                if child.type == "dotted_name":
-                    module_name = child.text.decode("utf-8", errors="replace")
-                    imports.append({
-                        "module": module_name,
-                        "names": [module_name],
-                        "is_relative": False,
-                    })
-                elif child.type == "aliased_import":
-                    dotted = child.child_by_field_name("name")
-                    if dotted:
-                        module_name = dotted.text.decode("utf-8", errors="replace")
-                        imports.append({
-                            "module": module_name,
-                            "names": [module_name],
-                            "is_relative": False,
-                        })
-
-        elif capture_name == "import_from":
-            # from X import Y, Z  /  from .X import Y
-            module_name = ""
-            names = []
-            is_relative = False
-
-            # Walk children to find module and imported names
-            # Structure: from, [dotted_name | relative_import], import, name, ...
-            past_import_keyword = False
-
-            for child in node.children:
-                if child.type == "relative_import":
-                    is_relative = True
-                    # Extract module name from inside the relative_import node
-                    for sub in child.children:
-                        if sub.type == "dotted_name":
-                            module_name = sub.text.decode("utf-8", errors="replace")
-                elif child.type == "dotted_name":
-                    if not past_import_keyword:
-                        # This is the module name (before 'import' keyword)
-                        module_name = child.text.decode("utf-8", errors="replace")
-                    else:
-                        # This is an imported name (after 'import' keyword)
-                        names.append(
-                            child.text.decode("utf-8", errors="replace")
-                        )
-                elif child.type == "aliased_import":
-                    name_node = child.child_by_field_name("name")
-                    if name_node:
-                        names.append(
-                            name_node.text.decode("utf-8", errors="replace")
-                        )
-                    past_import_keyword = True
-                elif child.type == "import":
-                    past_import_keyword = True
-
-            if not module_name and not names:
-                continue
-
-            imports.append({
-                "module": module_name,
-                "names": names,
-                "is_relative": is_relative,
+        if module:
+            out.append({
+                "kind": "import",
+                "module": module,
+                "names": [module],
+                "aliases": [{"name": module, "alias": alias}] if alias else [],
+                "alias": alias,
+                "is_relative": False,
+                "level": 0,
             })
+    return out
 
-    return imports
+
+def _parse_import_from(node) -> dict | None:
+    """from a.b import c as d  /  from ..x import y  /  from . import z  /  from m import *"""
+    module = ""
+    level = 0
+    names, aliases = [], []
+    module_node = node.child_by_field_name("module_name")
+    if module_node is not None:
+        if module_node.type == "relative_import":
+            for sub in module_node.children:
+                if sub.type == "import_prefix":
+                    level = _text(sub).count(".")
+                elif sub.type == "dotted_name":
+                    module = _text(sub)
+        else:
+            module = _text(module_node)
+    past_import = False
+    for child in node.children:
+        if child.type == "import":
+            past_import = True
+            continue
+        if not past_import:
+            continue
+        if child.type == "dotted_name":
+            names.append(_text(child))
+        elif child.type == "aliased_import":
+            name = _text(child.child_by_field_name("name"))
+            alias = _text(child.child_by_field_name("alias"))
+            if name:
+                names.append(name)
+                if alias:
+                    aliases.append({"name": name, "alias": alias})
+        elif child.type == "wildcard_import":
+            names.append("*")
+    if not module and not names:
+        return None
+    return {
+        "kind": "from",
+        "module": module,
+        "names": names,
+        "aliases": aliases,
+        "is_relative": level > 0,
+        "level": level,
+    }
+
+
+def _is_main_guard(if_node) -> bool:
+    cond = if_node.child_by_field_name("condition")
+    return cond is not None and bool(_MAIN_GUARD_RE.match(_text(cond)))
 
 
 # ---------------------------------------------------------------------------
-# Extraction: Call sites
+# Single scope-aware walk
 # ---------------------------------------------------------------------------
-def _extract_call_sites(tree, source_bytes: bytes) -> list[dict]:
-    """Extract all function call sites from the parsed tree."""
-    captures = CALL_QUERY.captures(tree.root_node)
+def _walk(tree, source_bytes: bytes, path: str) -> dict:
+    functions, classes, imports, call_sites = [], [], [], []
+    seen_calls = set()
 
-    call_sites = []
-    seen = set()
+    # Iterative DFS: (node, scope, in_main_guard). scope = tuple of ("class"|"function", name)
+    stack = [(tree.root_node, (), False)]
+    while stack:
+        node, scope, in_main = stack.pop()
+        t = node.type
+        child_scope = scope
+        child_main = in_main
 
-    for node, capture_name in captures:
-        if capture_name == "call.name":
-            # Simple call: verify_token()
-            callee = node.text.decode("utf-8", errors="replace")
-            caller = _get_enclosing_function(node, tree)
-            key = (caller, callee, node.start_point[0])
-            if key not in seen:
-                seen.add(key)
-                call_sites.append({
-                    "caller_function": caller,
-                    "callee": callee,
-                })
-        elif capture_name == "call.attr":
-            # Attribute call: self.db.query() → callee = "db.query"
-            attr_name = node.text.decode("utf-8", errors="replace")
-            # The parent of this identifier is the attribute node
-            attr_parent = node.parent
-            if attr_parent and attr_parent.type == "attribute":
-                obj_node = attr_parent.child_by_field_name("object")
-                if obj_node:
-                    obj_text = obj_node.text.decode("utf-8", errors="replace")
-                    # Simplify: strip "self." prefix for cleaner callee names
-                    if obj_text == "self":
-                        callee = attr_name
-                    else:
-                        if obj_text.startswith("self."):
-                            obj_text = obj_text[5:]
-                        callee = f"{obj_text}.{attr_name}"
+        if t == "class_definition":
+            name = _text(node.child_by_field_name("name"))
+            body = node.child_by_field_name("body")
+            qual = ".".join([s[1] for s in scope] + [name])
+            base_classes = []
+            supers = node.child_by_field_name("superclasses")
+            if supers is not None:
+                for child in supers.children:
+                    if child.type in ("identifier", "attribute"):
+                        base_classes.append(_text(child))
+            method_names = []
+            if body is not None:
+                for child in body.children:
+                    fn = child
+                    if child.type == "decorated_definition":
+                        fn = next((s for s in child.children if s.type == "function_definition"), None)
+                    if fn is not None and fn.type == "function_definition":
+                        method_names.append(_text(fn.child_by_field_name("name")))
+            classes.append({
+                "id": f"{path}::{qual}",
+                "name": name,
+                "qualified_name": qual,
+                "type": "class",
+                "start_line": node.start_point[0] + 1,
+                "end_line": node.end_point[0] + 1,
+                "base_classes": base_classes,
+                "method_names": method_names,
+                "is_nested": bool(scope),
+                "docstring": _get_docstring(body, source_bytes),
+            })
+            child_scope = scope + (("class", name),)
+
+        elif t == "function_definition":
+            name = _text(node.child_by_field_name("name"))
+            qual = ".".join([s[1] for s in scope] + [name])
+            is_method = bool(scope) and scope[-1][0] == "class"
+            class_name = ".".join(s[1] for s in scope) if is_method else None
+            functions.append({
+                "id": f"{path}::{qual}",
+                "name": name,
+                "qualified_name": qual,
+                "class_name": class_name,
+                "type": "function",
+                "start_line": node.start_point[0] + 1,
+                "end_line": node.end_point[0] + 1,
+                "parameters": _parameters(node.child_by_field_name("parameters")),
+                "is_method": is_method,
+                "is_nested": any(s[0] == "function" for s in scope),
+                "decorator_names": _decorators(node),
+                "docstring": _get_docstring(node.child_by_field_name("body"), source_bytes),
+            })
+            child_scope = scope + (("function", name),)
+
+        elif t == "import_statement":
+            imports.extend(_parse_import_statement(node))
+        elif t == "import_from_statement":
+            parsed = _parse_import_from(node)
+            if parsed:
+                imports.append(parsed)
+
+        elif t == "if_statement" and not scope and _is_main_guard(node):
+            child_main = True
+
+        elif t == "call":
+            target = _describe_call(node)
+            if target is not None:
+                # Caller: innermost function, else the module (class bodies count as module level)
+                fn_depth = max((i for i, s in enumerate(scope) if s[0] == "function"), default=-1)
+                if fn_depth >= 0:
+                    caller_qual = ".".join(s[1] for s in scope[: fn_depth + 1])
+                    caller_id = f"{path}::{caller_qual}"
+                    caller_function = scope[fn_depth][1]
                 else:
-                    callee = attr_name
-            else:
-                callee = attr_name
+                    caller_id = path
+                    caller_function = "__module__"
+                # Class for self/cls: the class enclosing the caller (methods and their closures)
+                cls_depth = max((i for i, s in enumerate(scope[: fn_depth + 1] if fn_depth >= 0 else scope) if s[0] == "class"), default=-1)
+                enclosing_class = ".".join(s[1] for s in scope[: cls_depth + 1]) if cls_depth >= 0 else None
+                fn_node = node.child_by_field_name("function")
+                callee = _text(fn_node)[:MAX_CALLEE_TEXT]
+                line = node.start_point[0] + 1
+                key = (caller_id, callee, line)
+                if key not in seen_calls:
+                    seen_calls.add(key)
+                    call_sites.append({
+                        "caller_function": caller_function,
+                        "caller_id": caller_id,
+                        "enclosing_class": enclosing_class,
+                        "callee": callee,
+                        "target": target,
+                        "line": line,
+                        "module_scope": fn_depth < 0,
+                        "in_main_guard": in_main,
+                    })
 
-            caller = _get_enclosing_function(node, tree)
-            key = (caller, callee, node.start_point[0])
-            if key not in seen:
-                seen.add(key)
-                call_sites.append({
-                    "caller_function": caller,
-                    "callee": callee,
-                })
+        # Push children in reverse so they are visited in source order
+        for child in reversed(node.children):
+            stack.append((child, child_scope, child_main))
 
-    return call_sites
+    # Stable, source-ordered output
+    functions.sort(key=lambda f: (f["start_line"], f["qualified_name"]))
+    classes.sort(key=lambda c: (c["start_line"], c["qualified_name"]))
+    call_sites.sort(key=lambda c: (c["line"], c["caller_id"], c["callee"]))
+    return {"functions": functions, "classes": classes, "imports": imports, "call_sites": call_sites}
 
 
 # ---------------------------------------------------------------------------
@@ -415,12 +371,7 @@ def parse_file(path: str, content: str) -> dict:
         return result
 
     tree = PARSER.parse(source_bytes)
-
-    result["functions"] = _extract_functions(tree, source_bytes, path)
-    result["classes"] = _extract_classes(tree, source_bytes, path)
-    result["imports"] = _extract_imports(tree, source_bytes)
-    result["call_sites"] = _extract_call_sites(tree, source_bytes)
-
+    result.update(_walk(tree, source_bytes, path))
     return result
 
 
@@ -443,7 +394,7 @@ def parse_repo(ingestion_output: dict) -> dict:
     total = len(files)
     parsed_files = []
 
-    for i, file_entry in enumerate(files, start=1):
+    for file_entry in files:
         path = file_entry.get("path", "unknown")
         content = file_entry.get("content", "")
         try:

@@ -12,6 +12,10 @@ import re
 from datetime import datetime, timezone
 
 import config
+from graph_builder import GRAPH_SCHEMA_VERSION
+
+# Graphs built with an older schema (different node ids) are never read back
+_SCHEMA_SUFFIX = f"__g{GRAPH_SCHEMA_VERSION}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -23,12 +27,12 @@ def _make_cache_key(repo: str, commit_sha: str) -> str:
     repo format is "owner/repo" — the slash is escaped to "__".
     Lowercase the repo (GitHub is case-insensitive).
     Replace any character that's not alphanumeric, dash, or underscore with "_".
-    Return format: "{owner}__{repo}__{commit_sha}.json"
+    Return format: "{owner}__{repo}__{commit_sha}__g{GRAPH_SCHEMA_VERSION}.json"
     """
     safe = repo.lower().replace("/", "__")
     safe = re.sub(r"[^a-z0-9_\-]", "_", safe)
     sha_safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", commit_sha)
-    return f"{safe}__{sha_safe}.json"
+    return f"{safe}__{sha_safe}{_SCHEMA_SUFFIX}"
 
 
 def _cache_path(key: str) -> Path:
@@ -142,7 +146,7 @@ def list_cached() -> list[dict]:
         return []
 
     entries = []
-    for file_path in cache_dir.glob("*.json"):
+    for file_path in cache_dir.glob(f"*{_SCHEMA_SUFFIX}"):
         try:
             size_kb = round(file_path.stat().st_size / 1024, 1)
             mtime = datetime.fromtimestamp(

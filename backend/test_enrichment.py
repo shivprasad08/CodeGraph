@@ -427,7 +427,7 @@ class TestEnrichGraph:
 
     @pytest.mark.asyncio
     async def test_only_top_degree_nodes_enriched(self):
-        # degrees: hub=4, mid=2, low=1, iso=0, ep=0 (entry point wins anyway)
+        # call degree (exact 1.0, inferred 0.5): hub=4, mid=2, low=1, ep=0, iso=0
         nodes = [
             _make_node("a.py::iso", "iso", "function", "a.py"),
             _make_node("a.py::low", "low", "function", "a.py"),
@@ -437,10 +437,11 @@ class TestEnrichGraph:
         ]
         nodes[4]["is_entry_point"] = True
         edges = [
-            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls"},
-            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls"},
-            {"source": "b.py::hub", "target": "x", "type": "calls"},
-            {"source": "a.py::low", "target": "b.py::hub", "type": "calls"},
+            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls", "confidence": "exact"},
+            {"source": "b.py::hub", "target": "b.py::mid", "type": "calls", "confidence": "exact"},
+            {"source": "b.py::hub", "target": "x", "type": "calls", "confidence": "exact"},
+            {"source": "a.py::low", "target": "b.py::hub", "type": "calls", "confidence": "exact"},
+            {"source": "c.py", "target": "c.py::ep", "type": "defines"},  # defines never counts
         ]
         sent = []
 
@@ -453,13 +454,58 @@ class TestEnrichGraph:
         ):
             result = await enrich_graph(_make_graph(nodes=nodes, edges=edges))
 
-        assert sorted(sent) == ["ep", "hub", "mid"]
+        # Ranked by call degree; the entry point (degree 0) no longer jumps the queue
+        assert sorted(sent) == ["hub", "low", "mid"]
         by_label = {n["label"]: n for n in result["nodes"]}
-        for label in ("ep", "hub", "mid"):
+        for label in ("hub", "low", "mid"):
             assert by_label[label]["summary_status"] == "ok"
-        for label in ("iso", "low"):
+        for label in ("iso", "ep"):
             assert by_label[label]["summary_status"] == "skipped"
             assert by_label[label]["summary"] == ""
+
+    def test_ranking_weights_inferred_edges_and_breaks_ties_with_entry_points(self):
+        from enrichment import _select_nodes_for_enrichment
+        nodes = [
+            _make_node("m.py::exact2", "exact2", "function", "m.py"),
+            _make_node("m.py::inferred3", "inferred3", "function", "m.py"),
+            _make_node("m.py::tie_plain", "tie_plain", "function", "m.py"),
+            _make_node("m.py::tie_entry", "tie_entry", "function", "m.py"),
+            _make_node("m.py::C.__repr__", "__repr__", "function", "m.py"),
+            _make_node("m.py::C.__init__", "__init__", "function", "m.py"),
+        ]
+        nodes[3]["is_entry_point"] = True
+        e = lambda s, t, c="exact": {"source": s, "target": t, "type": "calls", "confidence": c}
+        edges = [
+            e("x", "m.py::exact2"), e("y", "m.py::exact2"),                       # 2.0
+            e("x", "m.py::inferred3", "inferred"), e("y", "m.py::inferred3", "inferred"),
+            e("z", "m.py::inferred3", "inferred"),                                 # 1.5
+            e("x", "m.py::tie_plain"), e("x", "m.py::tie_entry"),                  # 1.0 each
+            e("x", "m.py::C.__repr__"), e("y", "m.py::C.__repr__"), e("z", "m.py::C.__repr__"),  # dunder: excluded
+            e("x", "m.py::C.__init__"), e("y", "m.py::C.__init__"), e("z", "m.py::C.__init__"),  # 3.0, kept
+        ]
+        graph = _make_graph(nodes=nodes, edges=edges)
+        assert _select_nodes_for_enrichment(graph, 3) == {"m.py::C.__init__", "m.py::exact2", "m.py::inferred3"}
+        # the tie at 1.0 goes to the entry point
+        assert "m.py::tie_entry" in _select_nodes_for_enrichment(graph, 4)
+        assert "m.py::C.__repr__" not in _select_nodes_for_enrichment(graph, 10)
+
+    @pytest.mark.asyncio
+    async def test_same_named_methods_get_their_own_summaries(self):
+        nodes = [
+            {**_make_node("f.py::A.get", "get", "function", "f.py"), "qualified_name": "A.get"},
+            {**_make_node("f.py::B.get", "get", "function", "f.py"), "qualified_name": "B.get"},
+        ]
+        prompts = []
+
+        async def _fake_groq(prompt, system):
+            prompts.append(prompt)
+            return json.dumps({"A.get": "Reads from A.", "B.get": "Reads from B."})
+
+        with patch("enrichment._call_groq", side_effect=_fake_groq):
+            result = await enrich_graph(_make_graph(nodes=nodes))
+        by_id = {n["id"]: n["summary"] for n in result["nodes"]}
+        assert by_id == {"f.py::A.get": "Reads from A.", "f.py::B.get": "Reads from B."}
+        assert '"name":"A.get"' in prompts[0]
 
 
 # ---------------------------------------------------------------------------

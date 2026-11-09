@@ -24,49 +24,57 @@ const PALETTE = [
     fill:   "rgba(124, 58, 237, 0.06)",   // purple  — accent
     stroke: "rgba(124, 58, 237, 0.35)",
     label:  "#9d5ff0",
-    name:   "purple"
+    name:   "purple",
+    token:  "var(--cg-cluster-1)"
   },
   {
     fill:   "rgba(59, 130, 246, 0.06)",   // blue
     stroke: "rgba(59, 130, 246, 0.35)",
     label:  "#60a5fa",
-    name:   "blue"
+    name:   "blue",
+    token:  "var(--cg-cluster-2)"
   },
   {
     fill:   "rgba(34, 197, 94, 0.06)",    // green
     stroke: "rgba(34, 197, 94, 0.30)",
     label:  "#4ade80",
-    name:   "green"
+    name:   "green",
+    token:  "var(--cg-cluster-3)"
   },
   {
     fill:   "rgba(245, 158, 11, 0.06)",   // amber
     stroke: "rgba(245, 158, 11, 0.30)",
     label:  "#fbbf24",
-    name:   "amber"
+    name:   "amber",
+    token:  "var(--cg-cluster-4)"
   },
   {
     fill:   "rgba(236, 72, 153, 0.06)",   // pink
     stroke: "rgba(236, 72, 153, 0.30)",
     label:  "#f472b6",
-    name:   "pink"
+    name:   "pink",
+    token:  "var(--cg-cluster-5)"
   },
   {
     fill:   "rgba(20, 184, 166, 0.06)",   // teal
     stroke: "rgba(20, 184, 166, 0.30)",
     label:  "#2dd4bf",
-    name:   "teal"
+    name:   "teal",
+    token:  "var(--cg-cluster-6)"
   },
   {
     fill:   "rgba(239, 68, 68, 0.06)",    // red
     stroke: "rgba(239, 68, 68, 0.30)",
     label:  "#f87171",
-    name:   "red"
+    name:   "red",
+    token:  "var(--cg-cluster-7)"
   },
   {
     fill:   "rgba(99, 102, 241, 0.06)",   // indigo
     stroke: "rgba(99, 102, 241, 0.30)",
     label:  "#818cf8",
-    name:   "indigo"
+    name:   "indigo",
+    token:  "var(--cg-cluster-8)"
   },
 ]
 

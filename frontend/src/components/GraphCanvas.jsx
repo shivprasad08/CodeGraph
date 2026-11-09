@@ -230,6 +230,45 @@ const GraphCanvas = forwardRef(function GraphCanvas({
     };
   }, [graph]);
 
+  // Once per graph, after the first layout: centre the camera on the largest connected
+  // component. Small detached clusters (scripts, demos) otherwise pull the centroid
+  // into empty space and the first view shows nothing.
+  const centeredGraphRef = useRef(null);
+  const centerOnCore = useCallback(() => {
+    const fg = fgRef.current;
+    if (!fg || centeredGraphRef.current === graph) return;
+    centeredGraphRef.current = graph;
+    if (selectedNodeId || zoomToNodes?.length) return;
+    const parent = new Map(transformedGraph.nodes.map((n) => [n.id, n.id]));
+    const find = (x) => {
+      while (parent.get(x) !== x) {
+        parent.set(x, parent.get(parent.get(x)));
+        x = parent.get(x);
+      }
+      return x;
+    };
+    for (const l of transformedGraph.links) {
+      const a = typeof l.source === "object" ? l.source.id : l.source;
+      const b = typeof l.target === "object" ? l.target.id : l.target;
+      if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b));
+    }
+    const groups = new Map();
+    for (const n of transformedGraph.nodes) {
+      if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) continue;
+      const r = find(n.id);
+      const g = groups.get(r) ?? { count: 0, x: 0, y: 0 };
+      g.count += 1;
+      g.x += n.x;
+      g.y += n.y;
+      groups.set(r, g);
+    }
+    let core = null;
+    for (const g of groups.values()) if (!core || g.count > core.count) core = g;
+    if (!core) return;
+    const reduced = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    fg.centerAt(core.x / core.count, core.y / core.count, reduced ? 0 : 400);
+  }, [graph, transformedGraph, selectedNodeId, zoomToNodes]);
+
   // Empty state check
   if (!graph || graph.nodes?.length === 0) {
     return (
@@ -603,6 +642,8 @@ const GraphCanvas = forwardRef(function GraphCanvas({
           }
           return link.width;
         }}
+        // Inferred calls (unknown receiver, unique method name) are dashed
+        linkLineDash={link => (link.confidence === "inferred" ? [3, 3] : null)}
         linkDirectionalArrowLength={link => link.type === "calls" ? 4 : 0}
         linkDirectionalArrowRelPos={1}
         linkDirectionalParticles={
@@ -634,7 +675,10 @@ const GraphCanvas = forwardRef(function GraphCanvas({
         
         cooldownTicks={200}
         warmupTicks={50}
-        onEngineStop={() => setSimulationDone(true)}
+        onEngineStop={() => {
+          setSimulationDone(true);
+          centerOnCore();
+        }}
         onZoom={onZoom ? ({ k }) => onZoom(k) : undefined}
       />
 
