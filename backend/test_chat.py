@@ -164,6 +164,42 @@ class TestBuildSystemPrompt:
         assert chat._referenced_nodes(text, graph) == ["src/store.py::Store.get"]
 
 
+class TestMultiLanguageReferences:
+    GRAPH = {"nodes": [
+        {"id": "server/src/index.js::createRoom"},
+        {"id": "server/src/codeRunner.js"},
+        {"id": "cmd/api/main.go::main"},
+        {"id": "store/store.go::Store.Get"},
+        {"id": "src/store.rs::Store.new"},
+        {"id": "src/main/java/com/x/App.java::App.run"},
+    ]}
+
+    def test_backticked_ids_in_any_language_and_file_ids(self):
+        text = (
+            "Rooms are made by `server/src/index.js::createRoom`, code runs in `server/src/codeRunner.js`, "
+            "the API starts at `cmd/api/main.go::main` and reads with `store/store.go::Store.Get`; "
+            "Rust builds via `src/store.rs::Store.new` and Java via `src/main/java/com/x/App.java::App.run`."
+        )
+        assert chat._referenced_nodes(text, self.GRAPH) == [
+            "server/src/index.js::createRoom", "server/src/codeRunner.js", "cmd/api/main.go::main",
+            "store/store.go::Store.Get", "src/store.rs::Store.new", "src/main/java/com/x/App.java::App.run",
+        ]
+
+    def test_invalid_and_non_id_code_spans_are_dropped(self):
+        text = (
+            "Call `createRoom()` or `npm start`; see `server/src/missing.js::nope`, `server/src/nope.js`, "
+            "`std::vec::Vec`, `x.length` and `main`.\nNODE: cmd/api/main.go::main\nNODE: src/fake.rs::gone"
+        )
+        assert chat._referenced_nodes(text, self.GRAPH) == ["cmd/api/main.go::main"]
+
+    def test_prompt_shows_non_python_ids_and_new_rules(self):
+        prompt = chat.build_system_prompt("o/r", {"repo": "o/r", "nodes": [], "edges": []})
+        assert "`server/src/index.js::createRoom`" in prompt and "NODE: server/src/index.js::createRoom" in prompt
+        assert "never merge them into one bullet" in prompt
+        assert "When a short name is ambiguous in the repo (main, start, get…), always cite the full id." in prompt
+        assert chat.CHAT_MAX_TOKENS == 1100
+
+
 class TestReferencedNodes:
     GRAPH = {"nodes": [
         {"id": "src/auth.py::verify_token"},

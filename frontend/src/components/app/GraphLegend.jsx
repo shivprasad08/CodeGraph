@@ -1,27 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { cn } from '../../lib/cn';
-import { groupNodesByDirectory } from '../../utils/directoryColors';
+import { clusterToken, moduleColoring } from '../../lib/moduleColors';
 import { focusRing } from '../../ui';
-import { NODE_COLORS } from '../GraphCanvas';
+
+/** Node type shapes, drawn exactly as the canvas draws them (neutral colour here). */
+export function TypeShape({ type }) {
+  const common = { width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': true, className: 'shrink-0 text-cg-secondary' };
+  if (type === 'file') return <svg {...common}><rect x="2.5" y="2.5" width="7" height="7" rx="2" fill="currentColor" /></svg>;
+  if (type === 'class') return <svg {...common}><circle cx="6" cy="6" r="3.6" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>;
+  if (type === 'entry') {
+    return (
+      <svg {...common}>
+        <circle cx="6" cy="6" r="3" fill="currentColor" />
+        <circle cx="6" cy="6" r="5.2" fill="none" stroke="currentColor" strokeWidth="1" />
+      </svg>
+    );
+  }
+  return <svg {...common}><circle cx="6" cy="6" r="3.2" fill="currentColor" /></svg>;
+}
 
 const TYPES = [
   ['file', 'File'],
-  ['function', 'Function'],
   ['class', 'Class'],
+  ['function', 'Function'],
   ['entry', 'Entry point'],
 ];
 
 /**
- * Collapsed "Legend" chip at the canvas bottom-left; opens a popover with node
- * types and directory clusters (toggle hulls, hide/show a cluster).
+ * Collapsed "Legend" chip at the canvas bottom-left; opens a popover: node types by shape,
+ * modules by colour (same colours as the architecture view), and a "Show modules" toggle.
  */
-export default function GraphLegend({ graph, dirColorMap, hullsVisible, onHullsVisibleChange, hiddenDirs, onHiddenDirsChange }) {
+export default function GraphLegend({ graph, hullsVisible, onHullsVisibleChange }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   const buttonRef = useRef(null);
-  const dirCounts = useMemo(() => groupNodesByDirectory(graph?.nodes ?? []), [graph]);
-  const dirs = Object.keys(dirColorMap).sort();
+  const modules = useMemo(() => {
+    const coloring = moduleColoring(graph);
+    return [...coloring.modules]
+      .sort((a, b) => (b.files?.length ?? 0) - (a.files?.length ?? 0) || a.label.localeCompare(b.label))
+      .map((m) => ({ id: m.id, label: m.label, files: m.files?.length ?? 0, color: clusterToken(coloring.colorIndex.get(m.id)) }));
+  }, [graph]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -29,13 +48,6 @@ export default function GraphLegend({ graph, dirColorMap, hullsVisible, onHullsV
     document.addEventListener('mousedown', onPointer);
     return () => document.removeEventListener('mousedown', onPointer);
   }, [open]);
-
-  const toggleDir = (dir) => {
-    const next = new Set(hiddenDirs);
-    if (next.has(dir)) next.delete(dir);
-    else next.add(dir);
-    onHiddenDirsChange(next);
-  };
 
   return (
     <div
@@ -60,46 +72,36 @@ export default function GraphLegend({ graph, dirColorMap, hullsVisible, onHullsV
           <ul className="mt-2 grid grid-cols-2 gap-1.5 text-cg-xs text-cg-text">
             {TYPES.map(([key, label]) => (
               <li key={key} className="flex items-center gap-2">
-                <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ backgroundColor: NODE_COLORS[key] }} />
+                <TypeShape type={key} />
                 {label}
               </li>
             ))}
           </ul>
-          {dirs.length > 0 && (
+          <p className="mt-2 text-cg-xs text-cg-tertiary">Size shows how connected a node is. Dashed links are inferred by name.</p>
+          {modules.length > 0 && (
             <>
               <div className="mt-3 flex items-center justify-between border-t border-cg-border pt-3">
-                <h3 className="text-cg-xs font-medium text-cg-secondary">Directory clusters</h3>
-                <label className="flex items-center gap-1.5 text-cg-xs text-cg-secondary">
+                <h3 className="text-cg-xs font-medium text-cg-secondary">Modules</h3>
+                <label className="flex items-center gap-1.5 text-cg-xs text-cg-secondary [@media(pointer:coarse)]:min-h-11">
                   <input
                     type="checkbox"
                     checked={hullsVisible}
                     onChange={(e) => onHullsVisibleChange(e.target.checked)}
                     className="h-3.5 w-3.5 accent-[var(--cg-text)]"
                   />
-                  Show
+                  Show modules
                 </label>
               </div>
-              <ul className="mt-2 flex max-h-48 flex-col overflow-y-auto">
-                {dirs.map((dir) => {
-                  const hidden = hiddenDirs.has(dir);
-                  return (
-                    <li key={dir}>
-                      <button
-                        type="button"
-                        aria-pressed={!hidden}
-                        onClick={() => toggleDir(dir)}
-                        title={hidden ? 'Show this cluster' : 'Hide this cluster'}
-                        className={cn('flex h-7 w-full items-center gap-2 rounded px-1 text-left text-cg-xs hover:bg-cg-hover [@media(pointer:coarse)]:min-h-11', focusRing)}
-                      >
-                        <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: dirColorMap[dir].stroke }} />
-                        <span className={cn('min-w-0 flex-1 truncate', hidden ? 'text-cg-tertiary line-through' : 'text-cg-text')}>
-                          {dir === '__root__' ? 'Root files' : `${dir}/`}
-                        </span>
-                        <span className="shrink-0 tabular-nums text-cg-tertiary">{dirCounts[dir]?.length || 0}</span>
-                      </button>
-                    </li>
-                  );
-                })}
+              <ul className="mt-2 flex max-h-48 flex-col gap-1 overflow-y-auto">
+                {modules.map((m) => (
+                  <li key={m.id} className="flex h-6 items-center gap-2 px-1 text-cg-xs">
+                    <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: m.color }} />
+                    <span className="min-w-0 flex-1 truncate text-cg-text">{m.label}</span>
+                    <span className="shrink-0 tabular-nums text-cg-tertiary">
+                      {m.files} {m.files === 1 ? 'file' : 'files'}
+                    </span>
+                  </li>
+                ))}
               </ul>
             </>
           )}

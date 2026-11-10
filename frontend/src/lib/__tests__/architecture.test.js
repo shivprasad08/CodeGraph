@@ -80,6 +80,23 @@ describe('buildArchitecture (maps graph.architecture)', () => {
     expect(withHidden.edges.some((e) => e.target === 'mod:api' && e.source === HIDDEN_MODULE_ID)).toBe(false);
   });
 
+  it('passes groups through and tags each module with its group', () => {
+    const withGroups = {
+      ...graph,
+      architecture: {
+        ...architecture,
+        groups: [{ id: 'grp:app', label: 'app', files: ['app/api/auth.py', 'app/api/routes.py', 'app/db/models.py'] }],
+        modules: architecture.modules.map((m) => (m.id === 'mod:server' ? m : { ...m, parent: 'grp:app' })),
+      },
+    };
+    const out = buildArchitecture(withGroups);
+    expect(out.groups).toEqual([{ id: 'grp:app', label: 'app' }]);
+    expect(Object.fromEntries(out.nodes.map((n) => [n.id, n.group]))).toEqual({
+      'mod:server': null, 'mod:api': 'grp:app', 'mod:db': 'grp:app',
+    });
+    expect(buildArchitecture(graph).groups).toEqual([]);
+  });
+
   it('flags graphs analysed before the architecture view existed', () => {
     const old = buildArchitecture({ nodes, edges });
     expect(old.missing).toBe(true);

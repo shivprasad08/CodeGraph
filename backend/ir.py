@@ -25,6 +25,10 @@ class Symbol:
     top_level: bool = True        # not nested in a function
     nesting: int = 0              # deepest control-flow nesting inside the body
     signature: str = ""           # first line of the definition (entry-point rules)
+    param_count: int = 0          # parameters, without self / cls / this
+    method_count: int = 0         # classes: methods defined directly in the class
+    decorated: bool = False       # decorator / annotation / attribute, or an override (@Override, impl Trait for)
+    exported: bool = False        # visible outside the module (JS export, Go Capitalised, Java public…)
 
 
 @dataclass

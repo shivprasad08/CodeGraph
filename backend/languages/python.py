@@ -527,14 +527,15 @@ def _with_ir(result: dict, content: str) -> dict:
         symbols.append(Symbol(
             id=cls["id"], kind="class", name=cls["name"], qualified_name=cls["qualified_name"], file=path,
             start_line=cls["start_line"], end_line=cls["end_line"], lang="python", doc=cls.get("doc", ""),
-            top_level=not cls.get("is_nested"),
+            top_level=not cls.get("is_nested"), method_count=len(cls.get("method_names", [])),
         ))
     for fn in result["functions"]:
         symbols.append(Symbol(
             id=fn["id"], kind="method" if fn.get("is_method") else "function", name=fn["name"],
             qualified_name=fn["qualified_name"], file=path, start_line=fn["start_line"], end_line=fn["end_line"],
             lang="python", class_name=fn.get("class_name"), top_level=not fn.get("is_nested"),
-            nesting=fn.get("nesting", 0),
+            nesting=fn.get("nesting", 0), param_count=len(fn.get("parameters", [])),
+            decorated=bool(fn.get("decorator_names")),
         ))
     calls = []
     for site in result["call_sites"]:

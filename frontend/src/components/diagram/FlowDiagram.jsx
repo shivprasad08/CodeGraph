@@ -248,7 +248,8 @@ export function layoutSpec(spec) {
           data: {
             ...n,
             vertical,
-            color: n.cluster ? getDirectoryColor(n.cluster, clusterKeys).token : null,
+            // A module colour from the architecture mapping wins; other diagrams colour by cluster
+        color: n.color ?? (n.cluster ? getDirectoryColor(n.cluster, clusterKeys).token : null),
             clickable: Boolean(n.nodeRef || n.members),
           },
         };

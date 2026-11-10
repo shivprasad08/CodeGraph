@@ -100,6 +100,16 @@ RULE_PACKS = {"python": _python_rules, "javascript": _js_rules, "typescript": _j
 
 # Language-agnostic structure thresholds
 LONG_FUNCTION_LINES = 50
+MAX_PARAMETERS = 6
+GOD_OBJECT_METHODS = 25
+GOD_OBJECT_LINES = 600
+# Methods the language or a framework calls (never "unused"): dunders are handled separately
+IMPLICIT_CALL_NAMES = frozenset({
+    "main", "init", "constructor", "new", "toString", "equals", "hashCode", "String", "Error", "Main",
+    "render", "componentDidMount", "componentDidUpdate", "componentWillUnmount", "getDerivedStateFromProps",
+    "setUp", "tearDown", "setUpClass", "tearDownClass", "drop", "fmt", "default", "clone", "finalize",
+})
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
 LARGE_FILE_LOC = 600
 DEEP_NESTING = 5
 DUPLICATE_NAME_IGNORE = frozenset({"main", "__init__", "init", "index", "constructor", "setup", "run", "new",
@@ -176,6 +186,9 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
             issues.append(_issue(first_file, first_line, "info", "quality",
                                  f"{name} is also defined in {others} — the same name in {len(files)} files", name))
 
+    # 1c. Parameter count, God objects, dead code (from the IR, every language)
+    issues.extend(_structure_issues(parse_output, source_files, graph))
+
     # 2. Graph & Parse Output based issues
     functions = [n for n in graph.get("nodes", []) if n.get("type") == "function"]
     classes = [n for n in graph.get("nodes", []) if n.get("type") == "class"]
@@ -219,19 +232,6 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
             fn_name = p_fn.get("name", "")
             start_line = p_fn.get("start_line", 0)
             
-            # Parameters
-            params = p_fn.get("args", [])
-            if len(params) > 6:
-                issues.append({
-                    "id": str(uuid.uuid4()),
-                    "file": file_path,
-                    "line": start_line,
-                    "severity": "medium",
-                    "type": "quality",
-                    "message": f"Function {fn_name} has {len(params)} parameters — may indicate poor design",
-                    "function": fn_name
-                })
-            
             # Missing docstrings
             if not fn_name.startswith("_") and not p_fn.get("is_method", False):
                 public_funcs += 1
@@ -256,18 +256,6 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
             methods = p_cls.get("methods", [])
             class_vars = p_cls.get("class_variables", [])
             
-            # God Object
-            if len(methods) > 15:
-                issues.append({
-                    "id": str(uuid.uuid4()),
-                    "file": file_path,
-                    "line": p_cls.get("start_line", 1),
-                    "severity": "medium",
-                    "type": "quality",
-                    "message": f"Class {cls_name} has {len(methods)} methods — possible God Object anti-pattern",
-                    "function": None
-                })
-                
             # Singleton
             is_singleton = any(m.get("name") in ("get_instance", "getInstance") for m in methods) or "_instance" in class_vars
             if is_singleton:
@@ -349,29 +337,6 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
                 "function": None
             })
             
-    # Dead code
-    # calculate in-degrees for functions
-    in_degrees = {n["id"]: 0 for n in functions}
-    for e in graph.get("edges", []):
-        if e.get("target") in in_degrees:
-            in_degrees[e.get("target")] += 1
-            
-    for fn in functions:
-        fn_id = fn["id"]
-        fn_name = fn.get("label", "")
-        if in_degrees.get(fn_id, 0) == 0:
-            if not fn_name.startswith("_") and not fn_name.startswith("test_"):
-                if fn_name not in ("main", "__init__", "__str__", "__repr__", "__eq__"):
-                    issues.append({
-                        "id": str(uuid.uuid4()),
-                        "file": fn.get("file"),
-                        "line": fn.get("lines", [1])[0],
-                        "severity": "low",
-                        "type": "dead_code",
-                        "message": f"Function {fn_name} appears to be unused",
-                        "function": fn_name
-                    })
-
     # Deduplicate patterns
     unique_patterns = []
     seen_patterns = set()
@@ -507,3 +472,77 @@ def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict]) 
             "test_coverage_estimate": round(test_coverage_estimate, 2)
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# Parameter count, God objects, dead code
+# ---------------------------------------------------------------------------
+def _is_dunder(name: str) -> bool:
+    return name.startswith("__") and name.endswith("__")
+
+
+def _external_base_classes(parse_output: dict) -> set:
+    """Python class ids with a base class that is not defined in the repo (methods may be overrides)."""
+    repo_classes = {c["name"] for pf in parse_output.get("parsed_files", []) for c in pf.get("classes", [])}
+    out = set()
+    for pf in parse_output.get("parsed_files", []):
+        for c in pf.get("classes", []):
+            bases = [b.split(".")[-1] for b in c.get("base_classes", []) if b not in ("object", "ABC", "Protocol")]
+            if any(b not in repo_classes for b in bases):
+                out.add(f"{pf['path']}::{c['qualified_name']}")
+    return out
+
+
+def _structure_issues(parse_output: dict, source_files: dict, graph: dict) -> list[dict]:
+    issues = []
+    nodes = {n["id"]: n for n in graph.get("nodes", [])}
+    callers = {}
+    for e in graph.get("edges", []):
+        if e.get("type") == "calls" and e.get("source") != e.get("target"):
+            callers[e["target"]] = callers.get(e["target"], 0) + 1
+    # How often each identifier appears anywhere in the repo source (cheap "is it referenced?" check)
+    words = {}
+    for content in source_files.values():
+        for w in _IDENTIFIER_RE.findall(content or ""):
+            words[w] = words.get(w, 0) + 1
+    overriding = _external_base_classes(parse_output)
+
+    for pf in parse_output.get("parsed_files", []):
+        path = pf.get("path")
+        lang = pf.get("lang", "python")
+        test_file = registry.is_test(path) if lang != "python" else ("/tests/" in f"/{path}" or path.split("/")[-1].startswith("test_"))
+        for sym in pf.get("symbols", []):
+            name, kind = sym["name"], sym["kind"]
+            line = sym["start_line"]
+            if kind in ("function", "method"):
+                if sym.get("param_count", 0) > MAX_PARAMETERS:
+                    issues.append(_issue(path, line, "medium", "quality",
+                                         f"Function {name} has {sym['param_count']} parameters — may indicate poor design", name))
+                if _looks_unused(sym, nodes.get(sym["id"], {}), callers, words, overriding, test_file):
+                    exact = lang == "python"  # full support: calls are resolved through scope
+                    issue = _issue(path, line, "low", "dead_code",
+                                   "No callers found — may be unused" if exact else "No callers found — possibly unused", name)
+                    issue["confidence"] = "likely" if exact else "possible"
+                    issues.append(issue)
+            elif kind in ("class", "struct"):
+                span = sym["end_line"] - sym["start_line"] + 1
+                methods = sym.get("method_count", 0)
+                if methods > GOD_OBJECT_METHODS or span > GOD_OBJECT_LINES:
+                    issues.append(_issue(path, line, "medium", "quality",
+                                         f"Class {name} has {methods} methods across {span} lines — possible God Object", None))
+    return issues
+
+
+def _looks_unused(sym: dict, node: dict, callers: dict, words: dict, overriding: set, test_file: bool) -> bool:
+    """No resolved callers, and nothing suggests it is reached another way."""
+    name = sym["name"]
+    if callers.get(sym["id"]) or node.get("is_entry_point"):
+        return False
+    if _is_dunder(name) or name in IMPLICIT_CALL_NAMES or test_file or name.lower().startswith("test"):
+        return False
+    if sym.get("decorated") or sym.get("exported"):
+        return False  # routes, handlers, fixtures, properties, overrides; public API used elsewhere
+    if sym.get("class_name") and f"{sym['file']}::{sym['class_name']}" in overriding:
+        return False  # may override a method of a third-party base class (Thread.run, Servicer.Method…)
+    # Referenced by name anywhere else (callbacks, dispatch tables, getattr, templates…)
+    return words.get(name, 0) <= 1

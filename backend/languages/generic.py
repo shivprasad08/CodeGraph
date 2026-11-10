@@ -119,6 +119,113 @@ def _outside_owner(def_node, lang: str, src: bytes) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Parameters, decorators, visibility (health checks: parameter count, dead code)
+# ---------------------------------------------------------------------------
+PARAM_LIST_TYPES = frozenset({
+    "formal_parameters", "parameter_list", "parameters", "method_parameters", "function_value_parameters",
+    "lambda_parameters", "block_parameters", "parameter_clause", "class_parameters",
+})
+SELF_PARAMS = frozenset({"self", "cls", "this", "&self", "&mut self", "mut self", "$this"})
+NOT_PARAMS = frozenset({"comment", "line_comment", "block_comment", "self_parameter", "attribute_item"})
+DECORATOR_TYPES = frozenset({"decorator", "annotation", "marker_annotation", "attribute_item", "attribute_list", "attribute"})
+BODY_TYPES = frozenset({"block", "statement_block", "compound_statement", "body", "function_body", "class_body",
+                        "declaration_list", "field_declaration_list"})
+
+
+def _param_list(def_node):
+    """The node holding a definition's parameters (searched outside the body)."""
+    value = def_node.child_by_field_name("value")  # const f = (a) => …  /  const g = x => …
+    if value is not None and value.type in ("arrow_function", "function_expression", "function"):
+        def_node = value
+    for field in ("parameters", "parameter"):
+        n = def_node.child_by_field_name(field)
+        if n is not None:
+            return n
+    stack = [c for c in def_node.children if c.type not in BODY_TYPES]
+    while stack:
+        n = stack.pop(0)
+        if n.type in PARAM_LIST_TYPES:
+            return n
+        stack.extend(c for c in n.children if c.type not in BODY_TYPES)
+    return None
+
+
+def _param_count(def_node, src: bytes) -> int:
+    """Parameters of a function/method, without self / cls / this."""
+    params = _param_list(def_node)
+    if params is None:
+        return 0
+    if params.type not in PARAM_LIST_TYPES:  # a single bare parameter: x => x * 2
+        return 1
+    count = 0
+    for c in params.named_children:
+        text = _text(c, src).strip()
+        if c.type in NOT_PARAMS or text in SELF_PARAMS or text.split(":")[0].strip() in SELF_PARAMS or text == "void":
+            continue
+        if c.type == "parameter_declaration" and c.child_by_field_name("type") is not None:
+            # Go: `a, b int` declares two parameters; C: one per declaration
+            names = [n for n in c.children if n.type == "identifier"]
+            count += max(1, len(names))
+            continue
+        count += 1
+    return count
+
+
+def _decorated(def_node, lang: str, src: bytes, signature: str) -> bool:
+    """Decorated / annotated (routes, handlers, fixtures, @Override…) or an override of a trait/base method."""
+    if any(c.type in DECORATOR_TYPES for c in def_node.children):
+        return True
+    for c in def_node.children:  # Java/Kotlin/C# modifiers hold annotations
+        if c.type in ("modifiers", "modifier_list") and any(
+            d.type in DECORATOR_TYPES for d in c.children
+        ):
+            return True
+    target = def_node
+    while target.parent is not None and target.parent.type in ("export_statement", "decorated_definition"):
+        target = target.parent
+    sib = target.prev_named_sibling
+    while sib is not None and sib.type in DECORATOR_TYPES | {"comment", "line_comment", "block_comment"}:
+        if sib.type in DECORATOR_TYPES:
+            return True
+        sib = sib.prev_named_sibling
+    if re.search(r"\boverride\b", signature):
+        return True
+    if lang == "rust":  # impl Trait for Type: trait methods are called through the trait
+        n = def_node.parent
+        while n is not None and n.type != "impl_item":
+            n = n.parent
+        if n is not None and n.child_by_field_name("trait") is not None:
+            return True
+    return False
+
+
+def _exported(def_node, name: str, lang: str, signature: str) -> bool:
+    """Visible outside its module, so it may be used by code this repo cannot see."""
+    if lang in ("javascript", "typescript"):
+        n = def_node
+        while n is not None:
+            if n.type == "export_statement":
+                return True
+            if n.type in ("program", "statement_block"):
+                return False
+            n = n.parent
+        return False
+    if lang == "go":
+        return name[:1].isupper()
+    if lang in ("java", "csharp"):
+        return bool(re.search(r"\b(public|protected)\b", signature))
+    if lang == "rust":
+        return bool(re.search(r"\bpub\b", signature))
+    if lang in ("kotlin", "swift", "scala"):
+        return not re.search(r"\b(private|fileprivate|internal)\b", signature)
+    if lang == "php":
+        return not re.search(r"\b(private|protected)\b", signature)
+    if lang in ("c", "cpp"):
+        return not re.search(r"\bstatic\b", signature)  # signature of the whole function_definition
+    return True  # ruby, lua: public by default
+
+
 def _type_kind(def_node, src: bytes) -> str | None:
     """Go `type X struct{}` / `type X interface{}` → struct / interface; other type aliases are skipped."""
     t = def_node.child_by_field_name("type")
@@ -307,6 +414,12 @@ def parse_file(path: str, content: str, lang: str) -> dict:
                     kind = "struct"
                 elif kind == "module" and def_node.type == "mod_item" and def_node.child_by_field_name("body") is None:
                     continue  # `mod store;` declares a file module; it is an import, not a definition
+                if def_node.type.endswith("declarator"):
+                    outer = def_node.parent
+                    while outer is not None and outer.type.endswith("declarator"):
+                        outer = outer.parent
+                    if outer is not None and outer.type == "function_definition":
+                        def_node = outer
                 key = (def_node.start_byte, def_node.end_byte)
                 if key not in raw_defs:
                     raw_defs[key] = (kind, _text(name_node, src), def_node)
@@ -345,13 +458,18 @@ def parse_file(path: str, content: str, lang: str) -> dict:
         if sid in seen_ids:
             continue  # overloads / redefinitions: keep the first
         seen_ids.add(sid)
+        signature = _short(_text(def_node, src).split("\n", 1)[0], 200)
+        is_function = kind in FUNCTION_KINDS
         sym = Symbol(
             id=sid, kind=kind, name=name, qualified_name=qualified, file=path,
             start_line=def_node.start_point[0] + 1, end_line=def_node.end_point[0] + 1, lang=lang,
             class_name=class_name, top_level=not in_function,
             doc=_preceding_doc(def_node, src) if kind in CLASS_KINDS else "",
-            nesting=max_nesting(def_node) if kind in FUNCTION_KINDS else 0,
-            signature=_short(_text(def_node, src).split("\n", 1)[0], 200),
+            nesting=max_nesting(def_node) if is_function else 0,
+            signature=signature,
+            param_count=_param_count(def_node, src) if is_function else 0,
+            decorated=_decorated(def_node, lang, src, signature),
+            exported=_exported(def_node, name, lang, signature),
         )
         symbols.append(sym)
         ranges.append((start, end, sym))
@@ -385,6 +503,13 @@ def parse_file(path: str, content: str, lang: str) -> dict:
         calls.append(CallRef(file=path, caller_id=caller_id, callee_text=name, lang=lang,
                              receiver=receiver, line=line, kind="new" if is_new else "call"))
 
+    methods_per_class = {}
+    for sym in symbols:
+        if sym.class_name:
+            methods_per_class[sym.class_name] = methods_per_class.get(sym.class_name, 0) + 1
+    for sym in symbols:
+        if sym.kind in CLASS_KINDS:
+            sym.method_count = methods_per_class.get(sym.qualified_name, 0)
     pf.symbols = symbols
     pf.calls = calls
     pf.imports = _imports(root, src, lang, path)

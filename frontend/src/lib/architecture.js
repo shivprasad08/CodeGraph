@@ -2,6 +2,8 @@
 // to a FlowDiagram spec. The grouping itself (directories / communities / hybrid) is
 // computed once on the server and cached with the graph.
 
+import { NEUTRAL_TOKEN, clusterToken, moduleColoring } from './moduleColors';
+
 export const MIN_EDGE_WEIGHT = 2;
 export const HIDDEN_MODULE_ID = 'mod:__hidden__';
 
@@ -68,6 +70,10 @@ export function buildArchitecture(graph, { includeHidden = false } = {}) {
       a.label.localeCompare(b.label),
   );
 
+  // Module colours: the same mapping the graph canvas and file tree use
+  const coloring = moduleColoring(graph);
+  const colorOf = (id) => (coloring.colorIndex.has(id) ? clusterToken(coloring.colorIndex.get(id)) : NEUTRAL_TOKEN);
+
   return {
     direction: 'TB',
     method: arch.method ?? null,
@@ -87,6 +93,7 @@ export function buildArchitecture(graph, { includeHidden = false } = {}) {
         members: m.files,
         entry: m.has_entry_points,
         group: m.parent ?? null,
+        color: colorOf(m.id),
       };
     }),
     edges: edges.map((e) => ({

@@ -95,6 +95,7 @@ export default function FileTree({
   selectedFilePath,
   selectedNodeId,
   dirColorMap = {},
+  fileColor, // path → CSS colour of its architecture module (falls back to dirColorMap)
 }) {
   const nodes = graph?.nodes ?? [];
   const tree = useMemo(() => buildTree(nodes), [nodes]);
@@ -269,7 +270,7 @@ export default function FileTree({
               const isSelected =
                 (row.kind === 'symbol' && row.node.id === selectedNodeId) ||
                 (row.kind === 'file' && row.path === selectedFilePath && !rows.some((r) => r.kind === 'symbol' && r.node.id === selectedNodeId));
-              const clusterColor = row.kind === 'file' ? dirColorMap[getTopLevelDir(row.path)]?.stroke : null;
+              const clusterColor = row.kind === 'file' ? (fileColor ? fileColor(row.path) : dirColorMap[getTopLevelDir(row.path)]?.stroke) : null;
               const Icon = row.kind === 'dir' ? (row.expanded ? FolderOpen : Folder) : File;
               return (
                 <div

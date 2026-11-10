@@ -29,7 +29,7 @@ MAX_EDGES_PER_TARGET = 2
 MIN_CALL_EDGES = 10
 
 FIRST_TOKEN_TIMEOUT_S = 30
-CHAT_MAX_TOKENS = 600
+CHAT_MAX_TOKENS = 1100  # chat replies only; enrichment keeps its own limit
 BUSY_MESSAGE = "The AI is busy right now — try again in a minute."
 
 
@@ -202,21 +202,26 @@ RULES — follow these exactly:
    algorithm from a filename. If the structure doesn't say, say you're not sure.
 3. Use the terminology of the repo's language (for example method, struct, trait,
    interface, module, package) rather than Python terms for non-Python code.
-4. When answering, cite specific node ids like `src/auth.py::verify_token`
+4. When answering, cite specific node ids exactly as they appear in the structure,
+   for example `src/auth.py::verify_token`, `server/src/index.js::createRoom`,
+   `cmd/api/main.go::main` or a file id such as `server/src/codeRunner.js`
    — wrap them in backticks. The frontend will make them clickable.
-5. If you're unsure which file handles something, say so and suggest
+5. When a short name is ambiguous in the repo (main, start, get…), always cite the full id.
+6. When two files implement different mechanisms, never merge them into one bullet.
+7. If you're unsure which file handles something, say so and suggest
    the most likely candidates based on the structure.
-6. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
-7. If asked for code, you may quote short snippets but remind the user
+8. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
+9. If asked for code, you may quote short snippets but remind the user
    to check the Code Inspector for the full implementation.
-8. End every answer with a "References:" section listing the node ids
+10. End every answer with a "References:" section listing the node ids
    you explicitly mentioned, one per line, prefixed with NODE:
    Example:
    References:
    NODE: src/auth.py::verify_token
-   NODE: src/auth.py::TokenVerifier
+   NODE: server/src/index.js::createRoom
+   NODE: server/src/codeRunner.js
    The frontend parses these to highlight nodes on the graph.
-9. If the question is about a process, flow or sequence ("how does X work",
+11. If the question is about a process, flow or sequence ("how does X work",
    "what happens when", "flow of"), then after the prose answer and before
    References output ONE fenced block like this, with 3-10 nodes:
    ```diagram
@@ -389,11 +394,13 @@ def extract_diagram(full_response: str, graph: dict) -> dict | None:
 
 MAX_REFERENCED_NODES = 10
 
-# "NODE: <id>" lines (optionally prefixed by "-", "*" or whitespace), or
-# backticked ids like `src/auth.py::verify_token` anywhere in the text.
+# "NODE: <id>" lines (optionally prefixed by "-", "*" or whitespace), or backticked ids
+# anywhere in the text: `path::Name` in any language (`server/src/index.js::createRoom`,
+# `cmd/main.go::main`, `src/store.rs::Store.new`) or a file id (`server/src/codeRunner.js`).
+# Every match is checked against the graph's node ids, so stray code spans are dropped.
 _NODE_REF_RE = re.compile(
     r"^[ \t*-]*NODE:[ \t]*(?P<line>[^\n]+?)[ \t]*$"
-    r"|`(?P<tick>[^`\s]+\.py::[^`\s]+)`",
+    r"|`(?P<tick>[^`\s]+::[^`\s]+|[^`\s:]+\.[A-Za-z0-9]+)`",
     re.MULTILINE,
 )
 

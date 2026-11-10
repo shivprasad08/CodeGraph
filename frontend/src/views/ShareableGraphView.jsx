@@ -5,6 +5,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { FileX, TriangleAlert, X } from 'lucide-react';
 import { analyzeRepo, fetchAnalysis, fetchGraph, fetchRepo, subscribeToJob } from '../api';
 import { buildDirectoryColorMap } from '../utils/directoryColors';
+import { fileColorToken, moduleColoring } from '../lib/moduleColors';
 import { isPlainKey, isTypingTarget } from '../lib/hotkeys';
 import { readStorage, safePanelStorage, writeStorage } from '../lib/storage';
 import { cn } from '../lib/cn';
@@ -162,6 +163,9 @@ export default function ShareableGraphView({ staticData = null } = {}) {
   }, [owner, repo, jobId, navigate, offline]);
 
   const dirColorMap = useMemo(() => (graphData ? buildDirectoryColorMap(graphData.nodes) : {}), [graphData]);
+  // One colour per architecture module: graph canvas, architecture view and file tree agree
+  const coloring = useMemo(() => (graphData ? moduleColoring(graphData) : null), [graphData]);
+  const fileColor = useCallback((path) => (coloring ? fileColorToken(coloring, path) : null), [coloring]);
 
   // ---- Selection & panels ----------------------------------------------------
   const [selectedNode, setSelectedNode] = useState(null);
@@ -178,7 +182,6 @@ export default function ShareableGraphView({ staticData = null } = {}) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [recentIds, setRecentIds] = useState([]);
   const [hullsVisible, setHullsVisible] = useState(true);
-  const [hiddenDirs, setHiddenDirs] = useState(EMPTY_SET);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
   const [filesSheet, setFilesSheet] = useState(false);
@@ -494,7 +497,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       onSimulateFile={simulate}
       selectedFilePath={selectedFilePath}
       selectedNodeId={selectedNode?.id ?? null}
-      dirColorMap={dirColorMap}
+      fileColor={fileColor}
     />
   );
 
@@ -540,12 +543,10 @@ export default function ShareableGraphView({ staticData = null } = {}) {
           highlightedNodeIds={effectiveHighlights}
           chatHighlightedNodeIds={chatHighlightedNodeIds}
           zoomToNodes={zoomToNodes}
-          dirColorMap={dirColorMap}
           blastRadius={blastRadius}
           simulationMode={simulationMode}
           onExitSimulation={exitSimulation}
           hullsVisible={hullsVisible}
-          hiddenDirs={hiddenDirs}
           onZoom={(k) => zoomListener.current?.(k)}
         />
 
@@ -596,14 +597,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
         )}
 
         {!simulationMode && canvasView === 'graph' && (
-          <GraphLegend
-            graph={graphData}
-            dirColorMap={dirColorMap}
-            hullsVisible={hullsVisible}
-            onHullsVisibleChange={setHullsVisible}
-            hiddenDirs={hiddenDirs}
-            onHiddenDirsChange={setHiddenDirs}
-          />
+          <GraphLegend graph={graphData} hullsVisible={hullsVisible} onHullsVisibleChange={setHullsVisible} />
         )}
 
         {code && (
