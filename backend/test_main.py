@@ -6,6 +6,7 @@ import asyncio
 from httpx import AsyncClient, ASGITransport
 from unittest.mock import patch
 
+import main
 from main import app, jobs
 from backend.ingestion import RepoNotFoundError
 
@@ -15,8 +16,9 @@ from backend.ingestion import RepoNotFoundError
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def reset_jobs():
-    """Clear the in-memory jobs store before each test."""
+    """Clear the in-memory store (jobs and finished graphs) before each test."""
     jobs.clear()
+    main.store.graphs.clear()
 
 
 @pytest.fixture
@@ -29,18 +31,16 @@ def client():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_analyze_valid_url(client):
-    with patch("main.BackgroundTasks.add_task") as mock_add_task:
-        response = await client.post("/analyze", json={"repo_url": "https://github.com/a/b"})
-        assert response.status_code == 200
-        data = response.json()
-        assert "job_id" in data
-        assert data["status"] == "queued"
-        
-        job_id = data["job_id"]
-        assert job_id in jobs
-        assert jobs[job_id]["status"] == "queued"
-        
-        mock_add_task.assert_called_once()
+    # The job is queued for the worker (not started by the request)
+    response = await client.post("/analyze", json={"repo_url": "https://github.com/a/b"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "job_id" in data
+    assert data["status"] == "queued"
+
+    job_id = data["job_id"]
+    assert job_id in jobs
+    assert jobs[job_id]["status"] == "queued"
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,12 @@ Start the backend server:
 uvicorn main:app --reload --port 8000
 ```
 
+On Windows, use the launcher instead (it sets the selector event loop that the Postgres
+driver needs, then runs `uvicorn main:app` with reload on port 8000):
+```bash
+python scripts/run_local.py            # --port 9000 to change the port
+```
+
 ### 3. Frontend Setup
 
 ```bash

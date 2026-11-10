@@ -159,6 +159,21 @@ async def _fetch_file_contents(owner: str, repo: str, sha: str, files: list[dict
     results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
 
+def _github_headers() -> dict:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return headers
+
+
+async def latest_commit(repo_url: str) -> tuple[str, str]:
+    """(owner/repo, short sha of the default branch) — two API calls, no file contents."""
+    owner, repo = await _parse_url(repo_url)
+    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=10.0) as client:
+        _branch, sha = await _get_default_branch_and_sha(owner, repo, client)
+    return f"{owner}/{repo}", sha
+
+
 async def fetch_repo(repo_url: str) -> dict:
     """
     Main entry point. Takes a raw URL string, returns the structured dict above.

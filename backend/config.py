@@ -36,6 +36,13 @@ ALLOWED_ORIGINS = parse_origins(os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORI
 ANALYZE_LIMIT_PER_HOUR = int(os.getenv("ANALYZE_LIMIT_PER_HOUR", 10))
 # ADMIN_KEY (for /cache) is read per request, so it is not cached here
 
+# Postgres (Neon). DATABASE_URL: the POOLED string, used by the app. DATABASE_URL_DIRECT:
+# the DIRECT string, used only for migrations. Secrets: never print or log them.
+DATABASE_URL = os.getenv("DATABASE_URL") or None
+DATABASE_URL_DIRECT = os.getenv("DATABASE_URL_DIRECT") or None
+# Render sets RENDER on its services; there the database is required
+IS_PRODUCTION = bool(os.getenv("RENDER"))
+
 def validate_config():
     errors = []
     if not GITHUB_TOKEN:
@@ -44,6 +51,10 @@ def validate_config():
         errors.append("GROQ_API_KEY is not set")
     if not MISTRAL_API_KEY:
         errors.append("MISTRAL_API_KEY is missing (fallback won't work)")
+    if IS_PRODUCTION and not DATABASE_URL:
+        errors.append("DATABASE_URL is not set (Neon pooled connection string)")
+    if IS_PRODUCTION and not DATABASE_URL_DIRECT:
+        errors.append("DATABASE_URL_DIRECT is not set (Neon direct connection string, for migrations)")
     if errors:
         for e in errors:
             print(f"[config] FATAL: {e}")

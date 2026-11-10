@@ -8,11 +8,17 @@ import logging
 import os
 import re
 
-SECRET_ENV_VARS = ("GITHUB_TOKEN", "GROQ_API_KEY", "MISTRAL_API_KEY", "ADMIN_KEY")
+SECRET_ENV_VARS = (
+    "GITHUB_TOKEN", "GROQ_API_KEY", "MISTRAL_API_KEY", "ADMIN_KEY",
+    "DATABASE_URL", "DATABASE_URL_DIRECT", "TEST_DATABASE_URL",
+)
 TOKEN_PATTERNS = re.compile(
     r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gsk_[A-Za-z0-9]{20,}"
     r"|(?i:x-admin-key|authorization)\s*[:=]\s*(?:(?i:bearer|token|basic)\s+)?\S+"
-    r"|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,})"
+    r"|(?i:bearer)\s+[A-Za-z0-9._~+/=-]{8,}"
+    # Postgres connection strings (URL form, and key=value DSNs with a password)
+    r"|(?i:postgres(?:ql)?(?:\+\w+)?)://[^\s'\"<>]+"
+    r"|(?i:password)\s*=\s*[^\s'\"]+)"
 )
 REDACTED = "[redacted]"
 

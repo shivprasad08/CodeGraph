@@ -17,6 +17,7 @@ from main import analyze_counts, app, jobs
 @pytest.fixture(autouse=True)
 def reset_state():
     jobs.clear()
+    main.store.graphs.clear()
     analyze_counts.clear()
     main.chat_message_counts.clear()
 
@@ -152,19 +153,18 @@ def test_startup_logs_origins_and_warns_on_render(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_eleventh_analysis_in_an_hour_is_429(client):
-    with patch("main.BackgroundTasks.add_task"):
-        for i in range(10):
-            r = await client.post("/analyze", json={"repo_url": f"https://github.com/a/r{i}"}, headers={"X-Forwarded-For": "9.9.9.9"})
-            assert r.status_code == 200, i
-            jobs[r.json()["job_id"]]["status"] = "done"  # not "active": only the hourly limit applies
-        r = await client.post("/analyze", json={"repo_url": "https://github.com/a/r10"}, headers={"X-Forwarded-For": "9.9.9.9"})
-        assert r.status_code == 429
-        body = r.json()
-        assert body["error_code"] == "rate_limited"
-        assert body["error"].startswith("You've started 10 analyses in the last hour. Try again in ")
-        # Another IP is not affected
-        other = await client.post("/analyze", json={"repo_url": "https://github.com/a/x"}, headers={"X-Forwarded-For": "1.2.3.4"})
-        assert other.status_code == 200
+    for i in range(10):
+        r = await client.post("/analyze", json={"repo_url": f"https://github.com/a/r{i}"}, headers={"X-Forwarded-For": "9.9.9.9"})
+        assert r.status_code == 200, i
+        jobs[r.json()["job_id"]]["status"] = "done"  # not "active": only the hourly limit applies
+    r = await client.post("/analyze", json={"repo_url": "https://github.com/a/r10"}, headers={"X-Forwarded-For": "9.9.9.9"})
+    assert r.status_code == 429
+    body = r.json()
+    assert body["error_code"] == "rate_limited"
+    assert body["error"].startswith("You've started 10 analyses in the last hour. Try again in ")
+    # Another IP is not affected
+    other = await client.post("/analyze", json={"repo_url": "https://github.com/a/x"}, headers={"X-Forwarded-For": "1.2.3.4"})
+    assert other.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,14 @@ def test_log_redaction(monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="codegraph.test"):
         logger.info("calling GitHub with %s", "github_pat_" + "B" * 30)
     assert "github_pat_" not in caplog.text and "[redacted]" in caplog.text
+
+
+def test_log_redaction_of_database_urls(monkeypatch):
+    url = "postgresql://neondb_owner:npg_S3cretPassw0rd@ep-cool-name-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require"
+    assert log_safety.redact(f"connect failed: {url} timeout") == "connect failed: [redacted] timeout"
+    assert log_safety.redact("dsn host=x password=npg_S3cret dbname=y") == "dsn host=x [redacted] dbname=y"
+    monkeypatch.setenv("DATABASE_URL", url)
+    assert "npg_S3cretPassw0rd" not in log_safety.redact(f"value was '{url}'")
 
 
 # ---------------------------------------------------------------------------

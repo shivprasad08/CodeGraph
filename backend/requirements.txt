@@ -12,3 +12,5 @@ mistralai==3.1.0
 aiofiles==23.2.1
 orjson==3.13.0
 prometheus-fastapi-instrumentator==8.1.0
+psycopg[binary]==3.3.8
+psycopg-pool==3.3.3
