@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Routes, Route, useLocation } from 'react-router-dom';
+import { Navigate, Routes, Route, useLocation, useParams } from 'react-router-dom';
 import LandingPageView from './views/LandingPageView';
 
 // Graph views pull in react-force-graph; keep them out of the landing bundle
@@ -7,6 +7,12 @@ const ShareableGraphView = lazy(() => import('./views/ShareableGraphView'));
 const DemoView = lazy(() => import('./views/DemoView'));
 // Dev-only design-system catalog
 const StyleGuideView = lazy(() => import('./views/StyleGuideView'));
+
+/** Old share links (/graph/owner/repo) no longer start an analysis: open the landing page, repo prefilled. */
+function RepoLinkRedirect() {
+  const { owner, repo } = useParams();
+  return <Navigate to={`/?repo=${encodeURIComponent(`${owner}/${repo}`)}`} replace />;
+}
 
 export default function App() {
   const location = useLocation();
@@ -19,7 +25,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LandingPageView />} />
         <Route path="/demo" element={<DemoView />} />
-        <Route path="/graph/:owner/:repo" element={<ShareableGraphView />} />
+        <Route path="/graph/:owner/:repo" element={<RepoLinkRedirect />} />
         <Route path="/graph/:owner/:repo/jobs/:jobId" element={<ShareableGraphView />} />
         {showDevRoutes && <Route path="/dev/ui" element={<StyleGuideView />} />}
       </Routes>

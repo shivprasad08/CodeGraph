@@ -42,10 +42,21 @@ def test_same_issue_density_gives_same_score_regardless_of_size():
     assert small["score"] == large["score"]
 
 
-def test_pattern_bonus_is_capped_at_five():
+def test_patterns_no_longer_change_the_score():
+    # Name-based "design pattern" detection was removed: it rewarded names like create_*, not quality
     base = compute_health_score(_issues(medium=20), _graph(100), [])
-    boosted = compute_health_score(_issues(medium=20), _graph(100), [{"name": "Factory"}] * 12)
-    assert boosted["score"] - base["score"] == 5
+    with_patterns = compute_health_score(_issues(medium=20), _graph(100), [{"name": "Factory"}] * 12)
+    assert with_patterns["score"] == base["score"]
+    assert compute_health_score(_issues(medium=20), _graph(100))["score"] == base["score"]
+
+
+def test_analysis_reports_no_patterns():
+    from analyzer import analyze_repo
+    from graph_builder import build_graph
+    from parser import parse_repo
+    src = "def create_widget():\n    return 1\n\ndef widget_factory():\n    return create_widget()\n"
+    po = parse_repo({"repo": "o/r", "commit_sha": "a", "files": [{"path": "m.py", "content": src}]})
+    assert analyze_repo(po, {"m.py": src}, build_graph(po))["patterns"] == []
 
 
 def test_score_is_clamped_and_metrics_kept():

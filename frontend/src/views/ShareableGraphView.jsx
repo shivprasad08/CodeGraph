@@ -2,8 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { FileX, TriangleAlert, X } from 'lucide-react';
-import { analyzeRepo, fetchAnalysis, fetchGraph, fetchRepo, subscribeToJob } from '../api';
+import { FileX, Lock, TriangleAlert, X } from 'lucide-react';
+import { analyzeRepo, fetchAnalysis, fetchGraph, subscribeToJob } from '../api';
 import { buildDirectoryColorMap } from '../utils/directoryColors';
 import { fileColorToken, moduleColoring } from '../lib/moduleColors';
 import { isPlainKey, isTypingTarget } from '../lib/hotkeys';
@@ -144,21 +144,6 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       );
     }
 
-    (async () => {
-      try {
-        const res = await fetchRepo(owner, repo);
-        if (res.status === 'cached') {
-          setGraphData(res.graph);
-          setJobStatus('done');
-          loadAnalysis(res.graph, null);
-        } else if (res.status === 'analyzing') {
-          navigate(`/graph/${owner}/${repo}/jobs/${res.job_id}`, { replace: true });
-        }
-      } catch (err) {
-        setError(err.message || `Could not analyze ${owner}/${repo}`);
-        setJobStatus('error');
-      }
-    })();
     return undefined;
   }, [owner, repo, jobId, navigate, offline]);
 
@@ -432,6 +417,20 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       {owner}/{repo}
     </span>
   );
+
+  if (error && errorCode === 'private_repo') {
+    return (
+      <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
+        <TopBarFrame repoLabel={repoCrumb} />
+        <CenterMessage
+          icon={<Lock size={24} strokeWidth={1.5} aria-hidden="true" className="mx-auto text-cg-tertiary" />}
+          title="Private repositories aren't supported"
+          body={`CodeGraph only analyzes public GitHub repositories, so ${owner}/${repo} was not read. Make it public, or analyze another repository.`}
+          actions={<Button variant="primary" onClick={() => navigate('/')}>Analyze another repo</Button>}
+        />
+      </div>
+    );
+  }
 
   if (error && errorCode === 'no_source') {
     return (

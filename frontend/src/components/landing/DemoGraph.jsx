@@ -3,7 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { CLUSTER_COUNT, moduleColoring } from '../../lib/moduleColors';
-import { buildAdjacency, computeDegrees, computeLayout, focusSet, nodeRadius, nodeShape } from '../../lib/graphRender';
+import {
+  buildAdjacency,
+  computeDegrees,
+  computeLayout,
+  displayLabels,
+  focusSet,
+  nodeRadius,
+  nodeShape,
+  topLabelIds,
+} from '../../lib/graphRender';
 import { TypeShape } from '../app/GraphLegend';
 
 const LABEL_COUNT = 20;
@@ -77,9 +86,10 @@ export default function DemoGraph({ graph }) {
       n.fy = n.y;
     }
     for (const l of links) l.__edge = withAlpha(byId.get(l.source)?.__color ?? tokens.neutral, l.type === 'imports' ? 0.05 : 0.09);
-    const labelIds = new Set(
-      [...nodes].sort((a, b) => (degrees.get(b.id) ?? 0) - (degrees.get(a.id) ?? 0)).slice(0, LABEL_COUNT).map((n) => n.id),
-    );
+    // Most connected nodes (never dunders); ambiguous names qualified as Class.method / file.func
+    const labelIds = topLabelIds(nodes, (n) => degrees.get(n.id) ?? 0, LABEL_COUNT);
+    const labelText = displayLabels(nodes);
+    for (const n of nodes) n.__text = labelText.get(n.id) ?? n.label;
     const labelOrder = [...nodes].sort((a, b) => (degrees.get(b.id) ?? 0) - (degrees.get(a.id) ?? 0)).map((n) => n.id);
     return { data: { nodes, links }, adjacency: buildAdjacency(links), labelIds, labelOrder, byId };
   }, [graph, tokens]);
@@ -186,14 +196,14 @@ export default function DemoGraph({ graph }) {
             for (const id of candidates) {
               const node = prepared.byId.get(id);
               if (!node || !Number.isFinite(node.x)) continue;
-              const w = ctx.measureText(node.label).width;
+              const w = ctx.measureText(node.__text).width;
               const x0 = node.x - w / 2;
               const y0 = node.y + node.__r + 3 / scale;
               if (placed.some((b) => x0 < b[2] && x0 + w > b[0] && y0 < b[3] && y0 + h > b[1])) continue;
               placed.push([x0, y0, x0 + w, y0 + h]);
               ctx.fillStyle = id === active?.id ? tokens.text : tokens.secondary;
-              ctx.strokeText(node.label, node.x, y0);
-              ctx.fillText(node.label, node.x, y0);
+              ctx.strokeText(node.__text, node.x, y0);
+              ctx.fillText(node.__text, node.x, y0);
             }
           }}
           nodePointerAreaPaint={(node, color, ctx) => {

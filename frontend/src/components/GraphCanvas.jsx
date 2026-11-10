@@ -5,6 +5,8 @@ import { CLUSTER_COUNT, moduleColoring } from '../lib/moduleColors';
 import {
   DIM_ALPHA,
   TOP_LABELS,
+  displayLabels,
+  topLabelIds,
   buildAdjacency,
   computeDegrees,
   computeLayout,
@@ -120,6 +122,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     const coloring = moduleColoring(graph);
     const degrees = computeDegrees(graph.edges ?? []);
     const fileOf = new Map(graph.nodes.map((n) => [n.id, n.type === 'file' ? n.id : n.file]));
+    const labelText = displayLabels(graph.nodes); // Class.method / file.func for ambiguous names
     const moduleIds = coloring.modules.map((m) => m.id);
     const moduleIndexOf = new Map(moduleIds.map((id, i) => [id, i]));
     const nodes = graph.nodes.map((n) => {
@@ -135,7 +138,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
         __degree: degree,
         __r: r,
         __shape: nodeShape(n),
-        __text: n.type === 'file' ? n.id.split('/').pop() : n.label ?? '',
+        __text: labelText.get(n.id) ?? n.label ?? '',
         __labelWidth: 0,
       };
     });
@@ -147,6 +150,9 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     ranked.forEach((n, i) => {
       n.__rank = i;
     });
+    // Mid zoom: the most connected nodes, never dunder methods (__init__, __exit__…)
+    const topIds = topLabelIds(nodes, (n) => n.__degree, TOP_LABELS);
+    for (const n of nodes) n.__top = topIds.has(n.id);
     return {
       coloring,
       nodes,
@@ -461,7 +467,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
         return;
       }
       if (tier === 'top') {
-        placeLabels(ctx, k, prepared, (n) => n.__rank < TOP_LABELS, null);
+        placeLabels(ctx, k, prepared, (n) => n.__top, null);
         return;
       }
       const z = zoomRef.current;

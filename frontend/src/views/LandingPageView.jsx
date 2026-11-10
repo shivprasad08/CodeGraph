@@ -1,7 +1,8 @@
 // Page pattern: marketing landing — nav, hero with the primary action, live product demo,
 // how it works, feature rows, stack, honest limits, footer.
 import { useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { normalizeRepoInput } from '../lib/repoInput';
 import { analyzeRepo } from '../api';
 import Hero from '../components/Hero';
 import SiteNav from '../components/landing/SiteNav';
@@ -23,6 +24,12 @@ const LIMITS = [
 export default function LandingPageView() {
   const navigate = useNavigate();
   const inputRef = useRef(null);
+  // A shared /graph/owner/repo link lands here with the repo prefilled (?repo=owner/repo)
+  const [searchParams] = useSearchParams();
+  const prefilledRepo = normalizeRepoInput(searchParams.get('repo') ?? '') || '';
+  useEffect(() => {
+    if (prefilledRepo) inputRef.current?.focus();
+  }, [prefilledRepo]);
 
   useEffect(() => {
     document.title = 'CodeGraph — Map any codebase';
@@ -53,7 +60,7 @@ export default function LandingPageView() {
       </a>
       <SiteNav onAnalyzeClick={focusRepoInput} />
       <main id="main" className="flex flex-col gap-16 pb-16 md:gap-28 md:pb-28">
-        <Hero onAnalyze={handleAnalyze} inputRef={inputRef} />
+        <Hero onAnalyze={handleAnalyze} inputRef={inputRef} initialRepo={prefilledRepo} />
         <LiveDemo />
         <HowItWorks />
         <FeatureRows />

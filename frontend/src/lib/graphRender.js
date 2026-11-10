@@ -152,3 +152,50 @@ export function computeLayout(nodes, links, moduleOf, options = LAYOUT) {
   }
   return { ticks, ms: (typeof performance !== 'undefined' ? performance : Date).now() - started };
 }
+
+// ---------------------------------------------------------------------------
+// Label text and label choice
+// ---------------------------------------------------------------------------
+export const isDunder = (name) => /^__\w+__$/.test(name ?? '');
+const fileStem = (path) => (path ?? '').split('/').pop().replace(/\.[^.]+$/, '');
+
+/**
+ * Text drawn for each node. Files show their file name. A short name that several nodes
+ * share (get, set, start, main, handle…) is qualified: "Class.method" for methods,
+ * "file.func" for module-level functions (and classes).
+ * @returns {Map<string, string>} id → label text
+ */
+export function displayLabels(nodes) {
+  const counts = new Map();
+  for (const n of nodes) {
+    if (n.type === 'file') continue;
+    counts.set(n.label, (counts.get(n.label) ?? 0) + 1);
+  }
+  const out = new Map();
+  for (const n of nodes) {
+    if (n.type === 'file') {
+      out.set(n.id, (n.id ?? '').split('/').pop());
+      continue;
+    }
+    const name = n.label ?? '';
+    if ((counts.get(name) ?? 0) < 2) {
+      out.set(n.id, name);
+    } else if (n.class_name) {
+      out.set(n.id, `${n.class_name.split('.').pop()}.${name}`);
+    } else {
+      out.set(n.id, `${fileStem(n.file)}.${name}`);
+    }
+  }
+  return out;
+}
+
+/** The `count` most connected nodes worth a label at mid zoom: never dunder methods. */
+export function topLabelIds(nodes, degreeOf, count = TOP_LABELS) {
+  return new Set(
+    nodes
+      .filter((n) => !isDunder(n.label))
+      .sort((a, b) => degreeOf(b) - degreeOf(a) || a.id.localeCompare(b.id))
+      .slice(0, count)
+      .map((n) => n.id),
+  );
+}

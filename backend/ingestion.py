@@ -10,14 +10,18 @@ from config import GITHUB_TOKEN, MAX_FILES
 from languages import registry
 
 class RepoNotFoundError(Exception): pass
-class RepoPrivateError(Exception): pass
+class RepoPrivateError(Exception):
+    """The repo is private (error_code "private_repo"). The server's GitHub token may be able
+    to read it, which is exactly why it must not be analysed or served."""
+    error_code = "private_repo"
+    message = "Private repositories aren't supported."
 class FileLimitError(Exception): pass
 class NoSourceError(Exception):
     """The repo has no file in a supported language (error_code "no_source")."""
     error_code = "no_source"
 
-# Python keeps its original selection rules (so Python graphs do not change):
-# no __init__.py, and no path containing any of these substrings
+# Python selection rules: no path containing any of these substrings, and no empty
+# __init__.py (a non-empty one is parsed: it often re-exports the package's public API)
 PYTHON_EXCLUDE = ["test", "tests", "migrations", "__pycache__", ".venv", "node_modules", "setup.py", "conftest.py"]
 MAX_FILE_BYTES = 100000
 # Read for entry points / import resolution; not counted as source files
@@ -47,7 +51,7 @@ def select_files(tree: list[dict]) -> tuple[list[dict], list[str]]:
         if lang is None or size > MAX_FILE_BYTES:
             continue
         if lang == "python":
-            if name == "__init__.py" or any(ex in path for ex in PYTHON_EXCLUDE):
+            if (name == "__init__.py" and size == 0) or any(ex in path for ex in PYTHON_EXCLUDE):
                 continue
         elif registry.is_ignored(path) or registry.is_test(path):
             continue
@@ -95,6 +99,8 @@ async def _get_default_branch_and_sha(owner: str, repo: str, client: httpx.Async
         raise RuntimeError(f"GitHub API error {response.status_code}: {url}")
         
     data = response.json()
+    if data.get("private"):
+        raise RepoPrivateError(RepoPrivateError.message)
     default_branch = data.get("default_branch")
     
     commits_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{default_branch}"
@@ -171,6 +177,8 @@ async def fetch_repo(repo_url: str) -> dict:
         branch, sha = await _get_default_branch_and_sha(owner, repo, client)
         files, manifest_paths = await _get_source_files(owner, repo, sha, client)
         file_contents = await _fetch_file_contents(owner, repo, sha, files, client)
+        # An __init__.py with only whitespace adds nothing to the graph
+        file_contents = [f for f in file_contents if not (f["path"].endswith("__init__.py") and not f["content"].strip())]
         manifest_contents = await _fetch_file_contents(owner, repo, sha, [{"path": p} for p in manifest_paths], client)
 
     return {

@@ -15,8 +15,8 @@ const INVALID_REPO = 'Enter a repository as owner/repo, for example psf/requests
  *   Should navigate on success and throw an Error with a readable message on failure.
  * @param {import('react').Ref<HTMLInputElement>} [props.inputRef] Lets the nav focus the field.
  */
-export default function Hero({ onAnalyze, inputRef }) {
-  const [value, setValue] = useState('');
+export default function Hero({ onAnalyze, inputRef, initialRepo = '' }) {
+  const [value, setValue] = useState(initialRepo);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [slow, setSlow] = useState(false);
@@ -45,6 +45,10 @@ export default function Hero({ onAnalyze, inputRef }) {
     try {
       await onAnalyze(repoPath);
     } catch (err) {
+      if (err?.code === 'rate_limited' || err?.code === 'private_repo') {
+        setError(err.message); // already says what to do next (when to retry / why)
+        return;
+      }
       setError(
         err?.message
           ? `Couldn't start the analysis: ${err.message.replace(/\.\s*$/, '')}. Try again in a minute.`

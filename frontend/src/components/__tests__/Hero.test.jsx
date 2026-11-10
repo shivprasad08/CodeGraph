@@ -93,4 +93,20 @@ describe('Hero', () => {
     });
     expect(screen.getByText(/Repository has more than 60 Python files.*Try again in a minute/)).toBeTruthy();
   });
+
+  it('shows the rate-limit message as the server words it (it already says when to retry)', async () => {
+    const limited = Object.assign(new Error("You've started 10 analyses in the last hour. Try again in 37 minutes."), { code: 'rate_limited' });
+    const { input } = setup(vi.fn(() => Promise.reject(limited)));
+    fireEvent.change(input, { target: { value: 'psf/requests' } });
+    await act(async () => {
+      fireEvent.submit(input.closest('form'));
+    });
+    expect(screen.getByText("You've started 10 analyses in the last hour. Try again in 37 minutes.")).toBeTruthy();
+    expect(screen.queryByText(/Couldn't start the analysis/)).toBeNull();
+  });
+
+  it('prefills the repository from a shared link', () => {
+    render(<Hero onAnalyze={vi.fn()} initialRepo="pallets/flask" />);
+    expect(screen.getByLabelText('GitHub repository').value).toBe('pallets/flask');
+  });
 });

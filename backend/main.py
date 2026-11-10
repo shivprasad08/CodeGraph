@@ -1,6 +1,7 @@
 # What it does: FastAPI routes, SSE progress stream, and background job runner
 # Module 6: Backend/Frontend Integration (Hardened for Module 10)
 
+import hmac
 import os
 import uuid
 import asyncio
@@ -26,7 +27,7 @@ import config
 import chat
 import impact
 from models import AnalyzeRequest, GraphResponse, ImpactRequest
-from ingestion import RepoNotFoundError, FileLimitError, NoSourceError
+from ingestion import RepoNotFoundError, FileLimitError, NoSourceError, RepoPrivateError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,12 +35,35 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%S"
 )
 logger = logging.getLogger("codegraph")
+# Never let a token reach the logs (see log_safety.py)
+import log_safety  # noqa: E402
+log_safety.install()
 
 # ---------------------------------------------------------------------------
 # In-memory job store
 # ---------------------------------------------------------------------------
 jobs: dict[str, dict] = {}
 chat_message_counts: dict[str, list[datetime]] = {}
+analyze_counts: dict[str, list[datetime]] = {}  # ip -> /analyze request times (last hour)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _require_admin(request: Request) -> None:
+    """Admin endpoints: X-Admin-Key must equal ADMIN_KEY. Without ADMIN_KEY they do not exist (404)."""
+    expected = os.environ.get("ADMIN_KEY") or ""
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not Found")
+    provided = request.headers.get("X-Admin-Key")
+    if not provided:
+        raise HTTPException(status_code=401, detail="Admin key required")
+    if not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
+        raise HTTPException(status_code=403, detail="Invalid admin key")
 
 async def _cleanup_old_jobs():
     """Background task to remove jobs older than 1 hour every 10 minutes."""
@@ -107,10 +131,10 @@ Instrumentator().instrument(app).expose(app)
 # Force wildcard CORS to ensure Vercel frontend can always connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Key"],
 )
 app.add_middleware(TimeoutMiddleware)
 
@@ -154,6 +178,10 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
         logger.info(f"Starting ingestion for {repo_url}")
         try:
             ingestion_result = await ingestion.fetch_repo(repo_url)
+        except RepoPrivateError:
+            logger.warning(f"Private repository rejected: {repo_url}")
+            job.update({"status": "error", "error": RepoPrivateError.message, "error_code": RepoPrivateError.error_code})
+            return
         except RepoNotFoundError:
             logger.warning(f"Repository not found or private: {repo_url}")
             job.update({"status": "error", "error": "Repository not found or is private"})
@@ -294,95 +322,32 @@ async def root():
         "health": "/health"
     }
 
-@app.get("/repo/{owner}/{repo:path}/meta")
-async def get_repo_meta(owner: str, repo: str):
-    repo_full = f"{owner}/{repo}"
-    cached_entries = cache.find_cached_by_repo(repo_full)
-    if not cached_entries:
-        return {"repo": repo_full, "cached": False}
-    
-    most_recent = cached_entries[0]
-    graph = cache.read_cache(most_recent["repo"], most_recent["commit_sha"])
-    if not graph:
-        return {"repo": repo_full, "cached": False}
-    
-    nodes = graph.get("nodes", [])
-    edges = graph.get("edges", [])
-    entry_points = [n["id"] for n in nodes if n.get("is_entry_point")]
-    
-    return {
-        "repo": repo_full,
-        "cached": True,
-        "commit_sha": most_recent["commit_sha"],
-        "cached_at": most_recent["cached_at"],
-        "node_count": len(nodes),
-        "edge_count": len(edges),
-        "entry_points": entry_points
-    }
-
-@app.get("/repo/{owner}/{repo:path}")
-async def get_or_analyze_repo(owner: str, repo: str, background_tasks: BackgroundTasks, request: Request):
-    repo_full = f"{owner}/{repo}"
-    
-    cached_entries = cache.find_cached_by_repo(repo_full)
-    if cached_entries:
-        most_recent = cached_entries[0]
-        graph = cache.read_cache(most_recent["repo"], most_recent["commit_sha"])
-        if graph:
-            return JSONResponse(
-                content={
-                    "status": "cached",
-                    "graph": graph,
-                    "cached_at": most_recent["cached_at"]
-                },
-                headers={"Cache-Control": "public, max-age=3600"}
-            )
-    
-    job_id = str(uuid.uuid4())
-    repo_url = f"https://github.com/{repo_full}"
-    
-    ip = request.headers.get("X-Forwarded-For")
-    if not ip:
-        ip = request.client.host if request.client else "unknown"
-    else:
-        ip = ip.split(",")[0].strip()
-        
-    jobs[job_id] = {
-        "job_id": job_id,
-        "repo_url": repo_url,
-        "status": "queued",
-        "progress": 0,
-        "stage": "queued",
-        "message": "Queued",
-        "error": None,
-        "error_code": None,
-        "graph": None,
-        "ip": ip,
-        "created_at": datetime.now(timezone.utc)
-    }
-    background_tasks.add_task(_run_pipeline, job_id, repo_url)
-    
-    return JSONResponse(
-        content={
-            "status": "analyzing",
-            "job_id": job_id,
-            "message": f"Starting analysis of {repo_full}..."
-        },
-        status_code=202
-    )
-
-
 @app.post("/analyze")
 async def analyze(request: Request, body: AnalyzeRequest, background_tasks: BackgroundTasks):
     if not body.repo_url or not body.repo_url.strip():
         raise HTTPException(status_code=422, detail="repo_url cannot be empty")
     
-    # Get request IP
-    ip = request.headers.get("X-Forwarded-For")
-    if not ip:
-        ip = request.client.host if request.client else "unknown"
-    else:
-        ip = ip.split(",")[0].strip()
+    ip = _client_ip(request)
+
+    # Rate limiting: analyses started per hour per IP
+    now = datetime.now(timezone.utc)
+    recent = [t for t in analyze_counts.get(ip, []) if t > now - timedelta(hours=1)]
+    if len(recent) >= config.ANALYZE_LIMIT_PER_HOUR:
+        analyze_counts[ip] = recent
+        wait_min = max(1, int((recent[0] + timedelta(hours=1) - now).total_seconds() // 60) + 1)
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": (
+                    f"You've started {config.ANALYZE_LIMIT_PER_HOUR} analyses in the last hour. "
+                    f"Try again in {wait_min} minute{'s' if wait_min != 1 else ''}."
+                ),
+                "error_code": "rate_limited",
+                "detail": None,
+            },
+        )
+    recent.append(now)
+    analyze_counts[ip] = recent
 
     # Rate limiting: max 5 active jobs per IP
     active_jobs = sum(
@@ -509,17 +474,25 @@ async def get_analysis(job_id: str):
 @app.get("/source/{owner}/{repo}/{commit_sha}/{file_path:path}")
 async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str):
     """
-    Returns the raw source content of a file fetched dynamically from GitHub.
+    Raw source of one file of an analysed repo, fetched from GitHub. Only paths that are file
+    nodes of the cached graph for that repo@sha are served: private repos are never analysed,
+    so this cannot be used to read them (or any other file) through the server's token.
     """
+    graph = cache.read_cache(f"{owner}/{repo}", commit_sha)
+    if not graph:
+        raise HTTPException(404, "File not found")
+    node = next((n for n in graph.get("nodes", []) if n.get("type") == "file" and n.get("id") == file_path), None)
+    if node is None:
+        raise HTTPException(404, "File not found")
     url = f"https://raw.githubusercontent.com/{owner}/{repo}/{commit_sha}/{file_path}"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
         resp = await client.get(url)
         if resp.status_code != 200:
-            raise HTTPException(404, "File not found on GitHub")
+            raise HTTPException(404, "File not found")
         return JSONResponse({
             "path": file_path,
             "content": resp.text,
-            "language": "python"
+            "language": node.get("lang") or "python",
         })
 
 
@@ -591,13 +564,8 @@ async def analyze_impact(owner: str, repo: str, commit_sha: str, request: Reques
         raise HTTPException(404, "Graph data not found in cache")
     
     # Simple rate limit logic similar to chat
-    ip = request.headers.get("X-Forwarded-For")
-    if not ip:
-        ip = request.client.host if request.client else "unknown"
-    else:
-        ip = ip.split(",")[0].strip()
-        
-    # Reuse chat counts or use separate impact counts
+    ip = _client_ip(request)
+    job_id = f"{owner}/{repo}@{commit_sha}"  # was undefined here: every request failed with a 500
     impact_key = f"impact_{ip}_{job_id}"
     counts = chat_message_counts.get(impact_key, [])
     one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -633,12 +601,14 @@ async def analyze_impact(owner: str, repo: str, commit_sha: str, request: Reques
 
 
 @app.get("/cache", response_model=list[dict])
-async def get_cache():
+async def get_cache(request: Request):
+    _require_admin(request)
     return cache.list_cached()
 
 
 @app.delete("/cache/{repo:path}")
-async def delete_cache(repo: str, commit_sha: str = None):
+async def delete_cache(repo: str, request: Request, commit_sha: str = None):
+    _require_admin(request)
     if commit_sha:
         deleted = cache.invalidate_cache(repo, commit_sha)
         return {"deleted": deleted, "key": f"{repo}@{commit_sha}"}

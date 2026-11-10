@@ -1,11 +1,27 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Ellipsis, ExternalLink, FolderTree, Link2, PanelLeft, PanelRight, Plus, RotateCw, Search } from 'lucide-react';
+import { Check, Ellipsis, ExternalLink, FolderTree, Link2, PanelLeft, PanelRight, Plus, RotateCw, Search } from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { MOD_KEY } from '../../lib/hotkeys';
 import { Button, IconButton, Kbd, Tooltip, focusRing } from '../../ui';
 import { Menu, MenuContent, MenuItem, MenuTrigger } from '../../ui/Menu';
 import { LogoMark } from '../landing/Logo';
+
+// Until real share links exist, the link opens CodeGraph with this repo ready to analyze
+const SHARE_LABEL = 'Copy analyze link';
+const SHARE_TOOLTIP = 'Opens CodeGraph with this repo ready to analyze';
+const SHARE_COPIED = 'Copied';
+const SHARE_ANNOUNCE = 'Link copied — opens with this repo ready to analyze';
+
+/** Both labels share one grid cell, so the button keeps the width of the longer one. */
+function ShareLabel({ copied }) {
+  return (
+    <span className="inline-grid">
+      <span className={cn('col-start-1 row-start-1', copied && 'invisible')}>{SHARE_LABEL}</span>
+      <span className={cn('col-start-1 row-start-1', !copied && 'invisible')}>{SHARE_COPIED}</span>
+    </span>
+  );
+}
 
 const icon = { size: 16, strokeWidth: 1.5, 'aria-hidden': true };
 
@@ -67,6 +83,7 @@ export default function AppTopBar({
   const [shareCopied, copyShare] = useCopied();
   const [shaCopied, copySha] = useCopied();
   const shareUrl = offline ? `${window.location.origin}/demo` : `${window.location.origin}/graph/${owner}/${repo}`;
+  const shareIcon = shareCopied ? <Check {...icon} /> : <Link2 {...icon} />;
   const rerunLabel = offline ? 'Re-run is available on your own analyses' : 'Re-run analysis';
 
   const repoLabel = (
@@ -138,8 +155,8 @@ export default function AppTopBar({
                 </IconButton>
               </MenuTrigger>
               <MenuContent align="end">
-                <MenuItem icon={<Link2 {...icon} />} onSelect={() => copyShare(shareUrl)}>
-                  {shareCopied ? 'Link copied' : 'Copy share link'}
+                <MenuItem icon={shareIcon} onSelect={() => copyShare(shareUrl)}>
+                  <ShareLabel copied={shareCopied} />
                 </MenuItem>
                 <MenuItem icon={<RotateCw {...icon} />} onSelect={onRerun} disabled={offline || rerunning}>
                   {rerunLabel}
@@ -159,9 +176,13 @@ export default function AppTopBar({
               <PanelRight {...icon} />
             </IconButton>
             <span aria-hidden="true" className="mx-1 h-5 w-px bg-cg-border" />
-            <Button size="sm" variant="secondary" onClick={() => copyShare(shareUrl)} leadingIcon={<Link2 {...icon} />} className="min-w-[88px]">
-              <span aria-live="polite">{shareCopied ? 'Copied' : 'Share'}</span>
-            </Button>
+            <Tooltip content={SHARE_TOOLTIP}>
+              <span className="inline-flex">
+                <Button size="sm" variant="secondary" onClick={() => copyShare(shareUrl)} leadingIcon={shareIcon}>
+                  <ShareLabel copied={shareCopied} />
+                </Button>
+              </span>
+            </Tooltip>
             <Tooltip content={rerunLabel}>
               {/* span keeps the tooltip working while the button is disabled */}
               <span className="inline-flex">
@@ -176,6 +197,10 @@ export default function AppTopBar({
           </>
         )}
       </div>
+      {/* Outside the menu, so the announcement survives the menu closing */}
+      <span className="sr-only" aria-live="polite">
+        {shareCopied ? SHARE_ANNOUNCE : ''}
+      </span>
     </TopBarFrame>
   );
 }

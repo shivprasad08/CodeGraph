@@ -11,7 +11,10 @@ export async function analyzeRepo(repoUrl) {
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Backend returned ${response.status}`);
+    const err = new Error(errorData.error || `Backend returned ${response.status}`);
+    err.code = errorData.error_code ?? (response.status === 429 ? 'rate_limited' : undefined);
+    err.status = response.status;
+    throw err;
   }
 
   return response.json();
@@ -60,24 +63,6 @@ export async function fetchGraph(jobId) {
     throw new Error(errorData.error || `Failed to fetch graph (${response.status})`);
   }
 
-  return response.json();
-}
-
-export async function fetchRepo(owner, repo) {
-  const response = await fetch(`${BASE_URL}/repo/${owner}/${repo}`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Backend returned ${response.status}`);
-  }
-  return response.json();
-}
-
-export async function fetchRepoMeta(owner, repo) {
-  const response = await fetch(`${BASE_URL}/repo/${owner}/${repo}/meta`);
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Backend returned ${response.status}`);
-  }
   return response.json();
 }
 

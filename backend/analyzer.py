@@ -118,12 +118,11 @@ DUPLICATE_NAME_IGNORE = frozenset({"main", "__init__", "init", "index", "constru
 
 def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
     """
-    Analyzes the repo for security, quality, and patterns.
+    Analyzes the repo for security and quality.
     Line rules: shared secrets/TODO checks plus a rule pack per language (Python, JS/TS).
     Structure: long functions, large files, deep nesting, duplicate names, circular imports.
     """
     issues = []
-    patterns = []
     lang_of = {pf.get("path"): pf.get("lang", "python") for pf in parse_output.get("parsed_files", [])}
 
     # 1. File-level Security and Quality Issues
@@ -250,75 +249,6 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
                 "function": None
             })
             
-        # Patterns inside classes
-        for p_cls in parsed_file.get("classes", []):
-            cls_name = p_cls.get("name", "")
-            methods = p_cls.get("methods", [])
-            class_vars = p_cls.get("class_variables", [])
-            
-            # Singleton
-            is_singleton = any(m.get("name") in ("get_instance", "getInstance") for m in methods) or "_instance" in class_vars
-            if is_singleton:
-                patterns.append({
-                    "name": "Singleton",
-                    "file": file_path,
-                    "class": cls_name,
-                    "description": "Ensures a class has only one instance and provides a global point of access to it."
-                })
-                
-            # Factory
-            is_factory = any("factory" in m.get("name", "").lower() or m.get("name", "").startswith("create_") for m in methods)
-            if "factory" in cls_name.lower() or is_factory:
-                patterns.append({
-                    "name": "Factory",
-                    "file": file_path,
-                    "class": cls_name,
-                    "description": "Creates objects without specifying the exact class to create."
-                })
-                
-            # Repository
-            repo_methods = {"get", "find", "save", "delete", "update", "list"}
-            cls_method_names = {m.get("name") for m in methods}
-            if len(repo_methods.intersection(cls_method_names)) >= 3:
-                patterns.append({
-                    "name": "Repository",
-                    "file": file_path,
-                    "class": cls_name,
-                    "description": "Mediates between the domain and data mapping layers using a collection-like interface."
-                })
-                
-            # Context Manager
-            if "__enter__" in cls_method_names and "__exit__" in cls_method_names:
-                patterns.append({
-                    "name": "Context Manager",
-                    "file": file_path,
-                    "class": cls_name,
-                    "description": "Implements the context management protocol (__enter__, __exit__) for resource management."
-                })
-                
-        # Factory or Decorator in module-level functions
-        for p_fn in parsed_file.get("functions", []):
-            fn_name = p_fn.get("name", "")
-            if "factory" in fn_name.lower() or fn_name.startswith("create_"):
-                # We might double count if it was a method, but module level funcs are here
-                patterns.append({
-                    "name": "Factory",
-                    "file": file_path,
-                    "class": fn_name,
-                    "description": "Function acting as a factory to create and return objects."
-                })
-                
-            # Decorator
-            params = p_fn.get("args", [])
-            if any(p in ("func", "fn", "decorated") for p in params):
-                # Loose heuristic for returning a function is harder without AST body inspection, but param is a good hint
-                patterns.append({
-                    "name": "Decorator",
-                    "file": file_path,
-                    "class": fn_name,
-                    "description": "Function that modifies the behavior of another function."
-                })
-    
     # Circular Imports
     import_edges = [(e["source"], e["target"]) for e in graph.get("edges", []) if e.get("type") == "imports"]
     nx_graph = nx.DiGraph(import_edges)
@@ -337,15 +267,6 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
                 "function": None
             })
             
-    # Deduplicate patterns
-    unique_patterns = []
-    seen_patterns = set()
-    for p in patterns:
-        key = (p["name"], p["file"], p.get("class"))
-        if key not in seen_patterns:
-            seen_patterns.add(key)
-            unique_patterns.append(p)
-            
     # Deduplicate issues
     unique_issues = []
     seen_issues = set()
@@ -356,7 +277,7 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
             unique_issues.append(i)
 
     # 3. Compute Health Score
-    health_result = compute_health_score(unique_issues, graph, unique_patterns)
+    health_result = compute_health_score(unique_issues, graph)
     
     # By File dict
     by_file = {}
@@ -373,13 +294,12 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
             by_file[f]["severity"] = issue["severity"]
             
     health_result["issues"] = unique_issues
-    health_result["patterns"] = unique_patterns
+    health_result["patterns"] = []  # kept for API compatibility; pattern detection was removed
     health_result["by_file"] = by_file
     
     return health_result
 
 HEALTH_DECAY = 1.2
-MAX_PATTERN_BONUS = 5
 
 
 def grade_for_score(score: int) -> str:
@@ -394,12 +314,15 @@ def grade_for_score(score: int) -> str:
     return "F"
 
 
-def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict]) -> dict:
+def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict] | None = None) -> dict:
     """
     Size-normalized health score. Issues are weighted (high 8, medium 3, low 1),
     structural problems add weight too, and the total is divided by the number of
     functions and classes, so a large repo is not penalized just for being large:
-        score = 100 * exp(-1.2 * weighted / items), plus a small pattern bonus (<= 5).
+        score = 100 * exp(-1.2 * weighted / items).
+    There is no bonus for "design patterns": the old detectors matched names (create_*,
+    *factory*) rather than structure, so they rewarded naming, not quality. `patterns` is
+    accepted and ignored for compatibility.
     """
     high_count = sum(1 for i in issues if i["severity"] == "high")
     med_count = sum(1 for i in issues if i["severity"] == "medium")
@@ -435,7 +358,7 @@ def compute_health_score(issues: list[dict], graph: dict, patterns: list[dict]) 
         weighted += 0.05 * items  # roughly -5 points
 
     density = weighted / items
-    score = 100 * math.exp(-HEALTH_DECAY * density) + min(len(patterns), MAX_PATTERN_BONUS)
+    score = 100 * math.exp(-HEALTH_DECAY * density)
     score = max(0, min(100, round(score))) # clamp 0-100
 
     grade = grade_for_score(score)

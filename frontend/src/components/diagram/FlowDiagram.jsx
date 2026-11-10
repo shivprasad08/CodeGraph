@@ -82,7 +82,7 @@ export const GROUP_GAP = 48;
  * Positions for a set of nodes: dagre for linked nodes, a grid for unlinked ones (under the
  * layout). `compact` lays fully unlinked sets out as a square-ish grid instead of 3+ wide.
  */
-function placeNodes(nodes, edges, direction, { compact = false } = {}) {
+function placeNodes(nodes, edges, direction, { compact = false, maxPerRow = 0 } = {}) {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: direction, ranksep: RANKSEP, nodesep: NODESEP, edgesep: EDGESEP, marginx: 16, marginy: 16 });
   g.setDefaultEdgeLabel(() => ({}));
@@ -106,6 +106,9 @@ function placeNodes(nodes, edges, direction, { compact = false } = {}) {
     maxX = Math.max(maxX, pos.x + p.width);
     maxY = Math.max(maxY, pos.y + p.height);
   }
+  if (maxPerRow > 0 && direction === 'TB' && linked.size) {
+    ({ minX, maxX, maxY } = wrapRanks(nodes, positions, maxPerRow, (minX + maxX) / 2));
+  }
   const loose = nodes.filter((n) => !linked.has(n.id));
   if (loose.length) {
     const startX = linked.size ? minX : 0;
@@ -121,6 +124,65 @@ function placeNodes(nodes, edges, direction, { compact = false } = {}) {
     });
   }
   return positions;
+}
+
+/**
+ * Breaks every dagre rank wider than `maxPerRow` nodes into rows (centred), pushing the
+ * ranks below down. Mutates `positions`; returns the new bounds of the placed nodes.
+ */
+function wrapRanks(nodes, positions, maxPerRow, centerX) {
+  const byRank = new Map();
+  for (const n of nodes) {
+    const p = positions.get(n.id);
+    if (!p) continue;
+    const key = Math.round(p.y + heightOf(n) / 2);
+    if (!byRank.has(key)) byRank.set(key, []);
+    byRank.get(key).push(n);
+  }
+  const ranks = [...byRank.entries()].sort((a, b) => a[0] - b[0]).map(([, members]) => members);
+  let y = Math.min(...ranks[0].map((n) => positions.get(n.id).y));
+  let minX = Infinity;
+  let maxX = -Infinity;
+  ranks.forEach((members, r) => {
+    members.sort((a, b) => positions.get(a.id).x - positions.get(b.id).x);
+    for (let start = 0; start < members.length; start += maxPerRow) {
+      const row = members.slice(start, start + maxPerRow);
+      const rowWidth = row.length * NODE_W + (row.length - 1) * NODESEP;
+      const x0 = centerX - rowWidth / 2;
+      row.forEach((n, i) => positions.set(n.id, { x: x0 + i * (NODE_W + NODESEP), y }));
+      minX = Math.min(minX, x0);
+      maxX = Math.max(maxX, x0 + rowWidth);
+      const rowHeight = Math.max(...row.map(heightOf));
+      const lastRow = start + maxPerRow >= members.length;
+      y += rowHeight + (lastRow && r < ranks.length - 1 ? RANKSEP : NODESEP);
+    }
+  });
+  return { minX, maxX, maxY: y - NODESEP };
+}
+
+/**
+ * Most compact arrangement for a pane of this aspect (width / height): the dagre layout
+ * top-to-bottom, the same with wide ranks wrapped into rows, or left-to-right. Picks the
+ * one that fits at the largest zoom (first candidate wins ties, so small diagrams keep
+ * the plain layout).
+ */
+function compactPlacement(nodes, edges, direction, aspect) {
+  const candidates = [{ direction, maxPerRow: 0 }];
+  if (direction === 'TB') {
+    const widest = nodes.length;
+    for (let k = Math.min(widest - 1, 8); k >= 2; k -= 1) candidates.push({ direction: 'TB', maxPerRow: k });
+    candidates.push({ direction: 'LR', maxPerRow: 0 });
+  }
+  let best = null;
+  for (const c of candidates) {
+    const positions = placeNodes(nodes, edges, c.direction, { maxPerRow: c.maxPerRow });
+    const box = boxOf(nodes, positions);
+    const w = box.x2 - box.x1;
+    const h = box.y2 - box.y1;
+    const score = Math.min(aspect / Math.max(w, 1), 1 / Math.max(h, 1)); // relative fit zoom
+    if (!best || score > best.score * 1.02) best = { ...c, positions, score };
+  }
+  return best;
 }
 
 const boxOf = (nodes, positions) =>
@@ -142,8 +204,8 @@ const boxOf = (nodes, positions) =>
  * With spec.groups (and node.group), each group is laid out on its own inside a frame
  * node (React Flow subflow) and frames sit left to right; ungrouped nodes come last.
  */
-export function layoutSpec(spec) {
-  const direction = spec.direction === 'LR' ? 'LR' : 'TB';
+export function layoutSpec(spec, { aspect = null } = {}) {
+  let direction = spec.direction === 'LR' ? 'LR' : 'TB';
   const ids = new Set(spec.nodes.map((n) => n.id));
   const edges = spec.edges.filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target);
 
@@ -152,7 +214,12 @@ export function layoutSpec(spec) {
   const frames = []; // {id, label, x, y, width, height}
   const parentOf = new Map();
   const groups = (spec.groups ?? []).filter((grp) => spec.nodes.some((n) => n.group === grp.id));
-  if (!groups.length) {
+  if (!groups.length && aspect && edges.length) {
+    // Pane aspect known: wrap wide ranks or turn left-to-right if that fits at a larger zoom
+    const best = compactPlacement(spec.nodes, edges, direction, aspect);
+    positions = best.positions;
+    direction = best.direction;
+  } else if (!groups.length) {
     positions = placeNodes(spec.nodes, edges, direction);
   } else {
     positions = new Map();
@@ -444,7 +511,10 @@ const idOf = (target, selector) => target?.closest?.(selector)?.getAttribute('da
  */
 function FlowDiagramInner({ spec, onNodeClick, height = 320, wheelZoom = false, onRequestFullscreen, ariaLabel, className }) {
   const tokens = useMemo(readTokens, []);
-  const layout = useMemo(() => layoutSpec(spec), [spec]);
+  const paneW = useStore((st) => st.width);
+  const paneH = useStore((st) => st.height);
+  const aspect = paneW && paneH ? Math.round((paneW / paneH) * 4) / 4 : null;
+  const layout = useMemo(() => layoutSpec(spec, { aspect }), [spec, aspect]);
   const bySpecId = useMemo(() => new Map(spec.nodes.map((n) => [n.id, n])), [spec]);
 
   // Pointer hover / keyboard focus win over the sticky click selection

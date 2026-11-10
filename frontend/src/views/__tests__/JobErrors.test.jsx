@@ -59,6 +59,16 @@ describe('job errors', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
   });
 
+  it('says private repositories are not supported, without a retry', async () => {
+    jobError.message = "Private repositories aren't supported.";
+    jobError.code = 'private_repo';
+    renderJob();
+    expect(await screen.findByText("Private repositories aren't supported")).toBeTruthy();
+    expect(screen.getByText(/only analyzes public GitHub repositories/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Analyze another repo' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
   it('keeps the generic error screen for other failures', async () => {
     jobError.message = 'Repo has 99 source files (JavaScript 94, TypeScript 5), limit is 60. Try a smaller repo.';
     jobError.code = 'file_limit';

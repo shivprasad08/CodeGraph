@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { buildArchitecture } from '../../../lib/architecture';
 import {
   ALWAYS_LABELLED,
   FIT_PADDING,
@@ -6,6 +9,7 @@ import {
   GROUP_LABEL_H,
   GROUP_PAD,
   LABEL_GAP,
+  SUBLABEL_MIN_ZOOM,
   decorate,
   fitZoom,
   labelBox,
@@ -266,5 +270,48 @@ describe('groups (multi-app repos)', () => {
 
   it('a spec without groups has no frames (unchanged layout)', () => {
     expect(layoutSpec(spec).nodes.some((n) => n.type === 'cgGroup')).toBe(false);
+  });
+});
+
+describe('compact first view (architecture)', () => {
+  // Real data: the committed mini_redis demo (12 modules, 25 links) at the desktop pane size
+  const demo = JSON.parse(readFileSync(resolve(process.cwd(), 'public/demo/mini_redis.json'), 'utf8'));
+  const spec = buildArchitecture(demo);
+  const pane = { width: 610, height: 620 };
+
+  it('opens mini_redis at ≥ 0.6× zoom, so sublabels are visible', () => {
+    const plain = layoutSpec(spec);
+    const compact = layoutSpec(spec, { aspect: pane.width / pane.height });
+    const plainZoom = fitZoom(plain.focusBox, pane.width, pane.height);
+    const compactZoom = fitZoom(compact.focusBox, pane.width, pane.height);
+    expect(plainZoom).toBeLessThan(0.6); // the problem: the plain dagre layout is too wide
+    expect(compactZoom).toBeGreaterThanOrEqual(0.6);
+    expect(compactZoom).toBeGreaterThanOrEqual(SUBLABEL_MIN_ZOOM);
+  });
+
+  it('keeps every module and link, without overlapping nodes', () => {
+    const { nodes, edges } = layoutSpec(spec, { aspect: pane.width / pane.height });
+    expect(nodes).toHaveLength(spec.nodes.length);
+    expect(edges).toHaveLength(spec.edges.length);
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i];
+        const b = nodes[j];
+        const overlap = a.position.x < b.position.x + b.width && b.position.x < a.position.x + a.width
+          && a.position.y < b.position.y + b.height && b.position.y < a.position.y + a.height;
+        expect(overlap).toBe(false);
+      }
+    }
+  });
+
+  it('switches to left-to-right for a long chain in a wide pane', () => {
+    const chain = {
+      direction: 'TB',
+      nodes: Array.from({ length: 6 }, (_, i) => ({ id: `n${i}`, label: `N${i}` })),
+      edges: Array.from({ length: 5 }, (_, i) => ({ source: `n${i}`, target: `n${i + 1}`, weight: 1 })),
+    };
+    const out = layoutSpec(chain, { aspect: 3 });
+    expect(out.nodes[0].data.vertical).toBe(false);
+    expect(layoutSpec(chain).nodes[0].data.vertical).toBe(true);
   });
 });

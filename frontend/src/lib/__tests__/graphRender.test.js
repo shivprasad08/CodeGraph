@@ -6,10 +6,13 @@ import {
   buildAdjacency,
   computeDegrees,
   computeLayout,
+  displayLabels,
   focusSet,
+  isDunder,
   labelTier,
   nodeRadius,
   nodeShape,
+  topLabelIds,
 } from '../graphRender';
 
 const file = (id) => ({ id, type: 'file' });
@@ -152,5 +155,38 @@ describe('layout', () => {
       const others = Object.entries(c).filter(([m]) => m !== n.module).map(([, p]) => Math.hypot(n.x - p.x, n.y - p.y));
       expect(own).toBeLessThan(Math.min(...others));
     }
+  });
+});
+
+describe('label rules', () => {
+  const nodes = [
+    file('src/store.py'),
+    { id: 'src/store.py::Store', label: 'Store', type: 'class', file: 'src/store.py' },
+    { id: 'src/store.py::Store.get', label: 'get', type: 'function', file: 'src/store.py', class_name: 'Store' },
+    { id: 'src/cache.py::Cache.get', label: 'get', type: 'function', file: 'src/cache.py', class_name: 'Outer.Cache' },
+    { id: 'src/cli.py::main', label: 'main', type: 'function', file: 'src/cli.py' },
+    { id: 'src/server.py::main', label: 'main', type: 'function', file: 'src/server.py' },
+    { id: 'src/store.py::Store.__init__', label: '__init__', type: 'function', file: 'src/store.py', class_name: 'Store' },
+    { id: 'src/store.py::Store.__exit__', label: '__exit__', type: 'function', file: 'src/store.py', class_name: 'Store' },
+    { id: 'src/util.py::slugify', label: 'slugify', type: 'function', file: 'src/util.py' },
+  ];
+
+  it('qualifies ambiguous names: Class.method for methods, file.func for functions', () => {
+    const text = displayLabels(nodes);
+    expect(text.get('src/store.py::Store.get')).toBe('Store.get');
+    expect(text.get('src/cache.py::Cache.get')).toBe('Cache.get'); // innermost class
+    expect(text.get('src/cli.py::main')).toBe('cli.main');
+    expect(text.get('src/server.py::main')).toBe('server.main');
+    expect(text.get('src/util.py::slugify')).toBe('slugify'); // unique: unchanged
+    expect(text.get('src/store.py')).toBe('store.py');
+  });
+
+  it('never picks dunder methods for the mid-zoom labels', () => {
+    const degree = { 'src/store.py::Store.__init__': 50, 'src/store.py::Store.__exit__': 40, 'src/util.py::slugify': 3 };
+    const ids = topLabelIds(nodes, (n) => degree[n.id] ?? 0, 3);
+    expect(ids.has('src/store.py::Store.__init__')).toBe(false);
+    expect(ids.has('src/store.py::Store.__exit__')).toBe(false);
+    expect(ids.has('src/util.py::slugify')).toBe(true);
+    expect(isDunder('__init__') && isDunder('__exit__') && !isDunder('_private') && !isDunder('init')).toBe(true);
   });
 });
