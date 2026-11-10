@@ -3,7 +3,7 @@
 import random
 import time
 
-from architecture import build_architecture, is_hidden
+from architecture import STANDALONE, build_architecture, is_hidden
 
 
 def make_graph(files, links=(), entry=(), symbols=None):
@@ -308,3 +308,46 @@ class TestTwoLevels:
         assert {"alpha core", "beta core", "gamma core"} & set(labels(arch))
         assert sorted(f for m in arch["modules"] for f in m["files"]) == sorted(files)
 
+
+
+class TestDefinitionlessFiles:
+    """Files that define nothing never make (or join) a module of their own."""
+
+    @staticmethod
+    def graph(extra_files, extra_imports=()):
+        files = [f"src/pkg/{d}/{n}.py" for d in ("election", "health", "membership") for n in ("core", "util")]
+        links = [(f"src/pkg/{d}/core.py", f"src/pkg/{d}/util.py", 3) for d in ("election", "health", "membership")]
+        g = make_graph(files, links)
+        for f in extra_files:  # file node only: no functions or classes
+            g["nodes"].append({"id": f, "type": "file", "file": f})
+        for a, b in extra_imports:
+            g["edges"].append({"source": a, "target": b, "type": "imports"})
+        return g
+
+    def test_root_package_file_is_hidden_not_standalone(self):
+        root = "src/pkg/__init__.py"
+        arch = build_architecture(self.graph([root], [(root, "src/pkg/election/core.py")]))
+        assert STANDALONE not in labels(arch)
+        assert labels(arch) == ["election", "health", "membership"]
+        assert root in arch["hidden"]
+        assert not any(root in m["files"] for m in arch["modules"])
+
+    def test_package_file_inside_a_folder_joins_that_folder(self):
+        init = "src/pkg/election/__init__.py"
+        arch = build_architecture(self.graph([init], [(init, "src/pkg/election/core.py")]))
+        election = next(m for m in arch["modules"] if m["label"] == "election")
+        assert election["files"] == ["src/pkg/election/__init__.py", "src/pkg/election/core.py", "src/pkg/election/util.py"]
+        assert init not in arch["hidden"]
+
+    def test_definitionless_files_never_reach_standalone(self):
+        lonely = "src/pkg/constants.py"         # no definitions, no edges
+        linked = "src/pkg/settings.py"          # no definitions, imports a folder only
+        alone = "src/pkg/alone.py"              # defines something, links to nothing
+        g = self.graph([lonely, linked], [(linked, "src/pkg/health/core.py")])
+        g["nodes"] += [{"id": alone, "type": "file", "file": alone},
+                       {"id": f"{alone}::run", "type": "function", "file": alone}]
+        arch = build_architecture(g)
+        standalone = next(m for m in arch["modules"] if m["label"] == STANDALONE)
+        assert standalone["files"] == [alone]
+        assert lonely in arch["hidden"] and linked in arch["hidden"]
+        assert arch["hidden"] == sorted(arch["hidden"])

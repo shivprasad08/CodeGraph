@@ -21,7 +21,8 @@ from generic_resolver import GenericLinker
 # Bump when node ids or edge semantics change; part of the cache key so old graphs are not reused
 # 7: non-empty __init__.py files are parsed; analysis drops the pattern bonus. Also retires any
 # graph cached before private repos were rejected (/source only serves files of cached graphs).
-GRAPH_SCHEMA_VERSION = 7
+# 8: files that define nothing no longer make architecture modules (package files join their folder).
+GRAPH_SCHEMA_VERSION = 8
 
 # Method names too common to infer from an unknown receiver (dict.get, list.append, file.close…)
 GENERIC_METHOD_STOPLIST = frozenset({

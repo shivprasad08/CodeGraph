@@ -15,6 +15,11 @@
 # A folder counts when it has ≥2 source files, or one file defining ≥3 functions/classes.
 # method: "directories" (folders only), "hybrid" (folders + clusters), "communities".
 # Tests, scripts, examples, docs, migrations, setup and config files are listed as "hidden".
+# Files that define nothing (no functions/classes, not an entry point) never make a module:
+# a package file (__init__.py, mod.rs, index.js) joins the module of its own folder, or is
+# hidden when that folder is not a module (the package root); any other such file is hidden
+# when it has no edges, and is never put in "standalone" ("standalone" = files that define
+# something but link to nothing).
 
 import posixpath
 import re
@@ -77,6 +82,10 @@ def _stem(path: str) -> str:
             name = f"{posixpath.basename(posixpath.dirname(parent))}/{name}"  # server/src, not src
         return name
     return stem
+
+
+def _is_package_file(path: str) -> bool:
+    return posixpath.splitext(posixpath.basename(path))[0] in PACKAGE_FILE_STEMS
 
 
 def _common_dir(paths: list[str]) -> list[str]:
@@ -213,8 +222,12 @@ def _attach_loose(root: list[str], real: dict, loose: list[str], pairs: dict, to
     return {k: sorted(v) for k, v in attached.items()}, remaining
 
 
-def _communities(files: list[str], pairs: dict, lo: int = MIN_COMMUNITIES, hi: int = MAX_COMMUNITIES) -> list[list[str]]:
-    """Louvain communities of connected files (resolution searched for lo..hi groups) + standalone files."""
+def _communities(files: list[str], pairs: dict, lo: int = MIN_COMMUNITIES, hi: int = MAX_COMMUNITIES,
+                 defless: frozenset = frozenset()) -> list[list[str]]:
+    """
+    Louvain communities of connected files (resolution searched for lo..hi groups) + standalone
+    files. Unlinked files that define nothing (`defless`) are left out: the caller hides them.
+    """
     G = nx.Graph()
     members = set(files)
     for f in sorted(files):
@@ -226,8 +239,9 @@ def _communities(files: list[str], pairs: dict, lo: int = MIN_COMMUNITIES, hi: i
                 G[a][b]["weight"] += weight
             else:
                 G.add_edge(a, b, weight=weight)
-    standalone = sorted(f for f in G.nodes if G.degree(f) == 0)
-    G.remove_nodes_from(standalone)
+    unlinked = [f for f in G.nodes if G.degree(f) == 0]
+    G.remove_nodes_from(unlinked)
+    standalone = sorted(f for f in unlinked if f not in defless)
 
     # Every resolution is tried; the result closest to ~sqrt(n) communities (inside lo..hi when
     # possible) wins, lowest resolution first on ties
@@ -257,14 +271,15 @@ def _slug(text: str) -> str:
 
 
 def _group(files: list[str], pairs: dict, symbols: dict, root: list[str] | None = None,
-           max_levels: int = MAX_DEPTH, communities_lo: int = MIN_COMMUNITIES) -> tuple[str, list]:
+           max_levels: int = MAX_DEPTH, communities_lo: int = MIN_COMMUNITIES,
+           defless: frozenset = frozenset()) -> tuple[str, list]:
     """(method, [(key, kind, files)]) for a set of files: folders, attached loose files, clusters."""
     chosen = _choose_folders(files, symbols, root, max_levels) if files else None
     if chosen is None:
-        return "communities", [("", COMMUNITY, c) for c in _communities(files, pairs, lo=communities_lo)] if files else []
+        return "communities", [("", COMMUNITY, c) for c in _communities(files, pairs, lo=communities_lo, defless=defless)] if files else []
     folder_root, real, loose = chosen
     folders, remaining = _attach_loose(folder_root, real, loose, pairs, len(files))
-    clusters = _communities(remaining, pairs, lo=1) if remaining else []
+    clusters = _communities(remaining, pairs, lo=1, defless=defless) if remaining else []
     raw = [(k, DIR, v) for k, v in sorted(folders.items())]
     raw += [("", COMMUNITY, c) for c in clusters]
     return ("hybrid" if clusters else "directories"), raw
@@ -365,8 +380,14 @@ def build_architecture(graph: dict) -> dict:
             by_file[f]["entry"] = True
     symbols = {f: v["functions"] + v["classes"] for f, v in by_file.items()}
 
+    # Definition-less files stay out of grouping: package files rejoin their folder's module below
+    defless = frozenset(f for f in files if not symbols.get(f) and not by_file[f]["entry"])
+    package_files = sorted(f for f in defless if _is_package_file(f))
+    hidden += [f for f in defless if f not in package_files and degree[f] == 0]
+    files = [f for f in files if f not in defless or (f not in package_files and degree[f] > 0)]
+
     # Top level. raw: (key, kind, files); kind is DIR (a real folder), COMMUNITY or CORE
-    method, raw = _group(files, pairs, symbols)
+    method, raw = _group(files, pairs, symbols, defless=defless)
     top_labels = _labels(raw, degree)
 
     # Two levels for multi-app repos: group inside each top-level folder
@@ -380,7 +401,7 @@ def build_architecture(graph: dict) -> dict:
         for i, (key, kind, members) in enumerate(raw):
             if kind != DIR:
                 continue
-            sub_method, sub = _group(members, pairs, symbols, root=key.split("/"), max_levels=MAX_EXTRA_LEVELS, communities_lo=1)
+            sub_method, sub = _group(members, pairs, symbols, root=key.split("/"), max_levels=MAX_EXTRA_LEVELS, communities_lo=1, defless=defless)
             # Only a folder with real subfolders becomes a group; a plain folder stays one module
             if sub_method != "communities" and len(sub) >= 2:
                 inner[i] = sub
@@ -398,13 +419,28 @@ def build_architecture(graph: dict) -> dict:
         for i, (key, kind, members) in enumerate(raw):
             if i in inner:
                 groups.append((top_labels[i], sorted(members)))
-                for label, (_k, _kind, sub_members) in zip(_labels(inner[i], degree, f"{top_labels[i]} core"), inner[i]):
-                    units.append((label, sorted(sub_members), top_labels[i]))
+                for label, (sub_key, sub_kind, sub_members) in zip(_labels(inner[i], degree, f"{top_labels[i]} core"), inner[i]):
+                    units.append((label, sorted(sub_members), top_labels[i], sub_key if sub_kind == DIR else None))
             else:
-                units.append((top_labels[i], sorted(members), None))
+                units.append((top_labels[i], sorted(members), None, key if kind == DIR else None))
     else:
         raw = _merge_into_core(raw, MAX_MODULES)
-        units = [(label, sorted(g[2]), None) for label, g in zip(_labels(raw, degree), raw)]
+        units = [(label, sorted(g[2]), None, g[0] if g[1] == DIR else None) for label, g in zip(_labels(raw, degree), raw)]
+
+    # Definition-less files that no module took (unlinked among the loose files) are hidden
+    placed = {f for u in units for f in u[1]}
+    hidden += [f for f in files if f not in placed]
+    # A definition-less package file joins the module of exactly its folder; else it is hidden
+    by_folder = {folder: i for i, (_l, _m, _p, folder) in enumerate(units) if folder}
+    for f in package_files:
+        i = by_folder.get(posixpath.dirname(f))
+        if i is None:
+            hidden.append(f)
+        else:
+            label, members, parent, folder = units[i]
+            units[i] = (label, sorted(members + [f]), parent, folder)
+    units = [u for u in units if u[1]]
+    hidden = sorted(hidden)
 
     # Ids
     group_ids = {}
@@ -424,7 +460,7 @@ def build_architecture(graph: dict) -> dict:
         out_groups.append({"id": gid, "label": label, "files": members})
     module_of = {}
     out_modules = []
-    for label, members, parent in units:
+    for label, members, parent, _folder in units:
         base = f"mod:{_slug(parent)}--{_slug(label)}" if parent else f"mod:{_slug(label)}"
         mid = unique(base)
         for f in members:
