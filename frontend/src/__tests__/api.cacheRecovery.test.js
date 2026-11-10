@@ -26,6 +26,8 @@ function fakeServer(routes) {
     vi.fn(async (url, init = {}) => {
       calls.push({ url: String(url), method: init.method || 'GET' });
       const key = Object.keys(routes).find((k) => String(url).includes(k));
+      // Job progress stream: finishes right away
+      if (!key && String(url).includes('/jobs/')) return sse({ status: 'done', progress: 100 });
       if (!key) throw new Error(`unexpected request ${url}`);
       const list = routes[key];
       const i = Math.min(counters[key] ?? 0, list.length - 1);
@@ -34,16 +36,6 @@ function fakeServer(routes) {
       // A Response body can only be read once, so hand out a fresh copy per call
       return typeof r === 'function' ? r() : r.clone();
     }),
-  );
-  // Job stream finishes right away
-  vi.stubGlobal(
-    'EventSource',
-    class {
-      constructor() {
-        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ status: 'done', progress: 100 }) }), 0);
-      }
-      close() {}
-    },
   );
   return {
     calls,

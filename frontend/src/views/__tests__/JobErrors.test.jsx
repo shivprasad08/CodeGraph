@@ -23,6 +23,9 @@ vi.mock('../../api', () => ({
   fetchChatSuggestions: vi.fn(never),
   fetchAnalysis: vi.fn(never),
   streamImpactAnalysis: vi.fn(never),
+  fetchMe: vi.fn(async () => null),
+  signOut: vi.fn(async () => {}),
+  signInUrl: (next) => `/api/auth/github/login?next=${encodeURIComponent(next)}`,
   API_ERROR: {},
 }));
 
@@ -67,6 +70,18 @@ describe('job errors', () => {
     expect(screen.getByText(/only analyzes public GitHub repositories/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Analyze another repo' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+
+  it("someone else's analysis: a private card with Analyze this repo and Sign in, and no graph request", async () => {
+    const api = await import('../../api');
+    jobError.message = 'This analysis is private.';
+    jobError.code = 'private_analysis';
+    renderJob();
+    expect(await screen.findByText('This analysis is private')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Analyze this repo' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(api.fetchGraph).not.toHaveBeenCalled();
   });
 
   it('keeps the generic error screen for other failures', async () => {

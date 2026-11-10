@@ -4,6 +4,8 @@
 # Storage (store.py): Postgres when DATABASE_URL is set — analyses and jobs survive restarts —
 # else process memory. The /tmp cache (cache.py) is only an L1 read-through cache in front of it.
 # Jobs are run by an in-process worker (worker.py) that claims them from the store.
+# Access (auth.py): with Postgres, every analysis is private to the session that ran it (or a
+# share link). Without Postgres (local dev, tests) there are no accounts and no access checks.
 
 import hmac
 import os
@@ -32,6 +34,9 @@ import config
 import chat
 import impact
 import db
+import auth
+import accounts
+import auth_store
 import store as store_mod
 import worker as worker_mod
 from graph_builder import GRAPH_SCHEMA_VERSION
@@ -145,6 +150,19 @@ async def _open_store():
     return pg
 
 
+async def _graph_by_analysis(analysis_id, repo, sha, schema_version) -> dict | None:
+    """A stored graph by analysis id, through the L1 cache when it is of the current schema."""
+    current = bool(repo and sha) and schema_version == GRAPH_SCHEMA_VERSION
+    if current:
+        graph = cache.read_cache(repo, sha)
+        if graph:
+            return graph
+    graph = await store.analysis_graph(analysis_id)
+    if graph and current:
+        _write_l1(repo, sha, graph)
+    return graph
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global store, worker
@@ -152,6 +170,13 @@ async def lifespan(app: FastAPI):
     _check_grammar_cache()
     _log_allowed_origins(config.ALLOWED_ORIGINS)
     store = await _open_store()
+    if store.kind == "postgres":
+        auth.runtime.auth = auth_store.AuthStore(store.pool)
+        auth.runtime.load_graph = _graph_by_analysis
+        if not (config.GITHUB_OAUTH_CLIENT_ID and config.GITHUB_OAUTH_CLIENT_SECRET and config.SESSION_SECRET):
+            logger.warning("[auth] GitHub sign-in is not configured: analyses stay anonymous (per browser session)")
+    else:
+        logger.warning("[auth] no database: accounts are off and analyses are not access-controlled")
     # Jobs left running by a previous process are re-claimed once their lock expires
     worker = worker_mod.Worker(store, _run_pipeline)
     tasks = [asyncio.create_task(worker.run_forever()), asyncio.create_task(_maintenance_loop())]
@@ -159,6 +184,7 @@ async def lifespan(app: FastAPI):
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    auth.runtime.auth = None
     await store.close()
 
 app = FastAPI(title="CodeGraph API", version="1.0.0", lifespan=lifespan)
@@ -170,9 +196,12 @@ app.add_middleware(
     allow_origins=config.ALLOWED_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Content-Type", "Authorization", "X-Admin-Key"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Key", "X-CodeGraph", "X-Share-Token"],
 )
+app.add_middleware(auth.CSRFMiddleware)
 app.add_middleware(TimeoutMiddleware)
+app.include_router(auth.router)
+app.include_router(accounts.router)
 
 
 # ---------------------------------------------------------------------------
@@ -387,50 +416,97 @@ async def analyze(request: Request, body: AnalyzeRequest):
         raise HTTPException(status_code=422, detail="repo_url cannot be empty")
 
     ip = _client_ip(request)
+    session = await auth.ensure_session(request)  # anonymous session on a first visit
 
-    # Rate limiting: analyses started per hour per IP
-    now = datetime.now(timezone.utc)
-    recent = [t for t in analyze_counts.get(ip, []) if t > now - timedelta(hours=1)]
-    if len(recent) >= config.ANALYZE_LIMIT_PER_HOUR:
+    # Rate limiting: analyses started per hour (signed in: per user; anonymous: per session and IP)
+    if auth.access_control_enabled():
+        if auth.signed_in(session):
+            limit, keys = config.ANALYZE_LIMIT_SIGNED_IN, [f"analyze:user:{session['user_id']}"]
+        else:
+            limit = config.ANALYZE_LIMIT_PER_HOUR
+            keys = [f"analyze:session:{session['id']}", f"analyze:ip:{store_mod.hash_ip(ip)}"]
+        wait_s = await auth.runtime.auth.rate_hit(keys, limit, timedelta(hours=1))
+    else:
+        limit = config.ANALYZE_LIMIT_PER_HOUR
+        now = datetime.now(timezone.utc)
+        recent = [t for t in analyze_counts.get(ip, []) if t > now - timedelta(hours=1)]
+        wait_s = None
+        if len(recent) >= limit:
+            wait_s = (recent[0] + timedelta(hours=1) - now).total_seconds()
+        else:
+            recent.append(now)
         analyze_counts[ip] = recent
-        wait_min = max(1, int((recent[0] + timedelta(hours=1) - now).total_seconds() // 60) + 1)
-        return JSONResponse(
+    if wait_s is not None:
+        wait_min = max(1, int(wait_s // 60) + 1)
+        return auth.attach_new_session(request, JSONResponse(
             status_code=429,
             content={
                 "error": (
-                    f"You've started {config.ANALYZE_LIMIT_PER_HOUR} analyses in the last hour. "
+                    f"You've started {limit} analyses in the last hour. "
                     f"Try again in {wait_min} minute{'s' if wait_min != 1 else ''}."
                 ),
                 "error_code": "rate_limited",
                 "detail": None,
             },
-        )
-    recent.append(now)
-    analyze_counts[ip] = recent
+        ))
 
     # Rate limiting: max 5 active jobs per IP
     if await store.active_jobs_for_ip(ip) >= 5:
-        return JSONResponse(
+        return auth.attach_new_session(request, JSONResponse(
             status_code=429,
             content={
                 "error": "Too many active jobs from this IP. Wait for existing jobs to complete.",
                 "detail": None
             }
-        )
+        ))
 
     # Latest commit already analysed with this graph schema: a job that is done straight away
+    status = "queued"
+    job_id = None
     latest = await _latest_commit(body.repo_url)
     if latest:
         analysis_id = await store.find_done_analysis(*latest)
         if analysis_id is not None:
             job_id = await store.create_done_job(body.repo_url, ip, analysis_id)
+            status = "done"
             logger.info(f"[analyze] {latest[0]}@{latest[1]} already analysed: job {job_id} done")
-            return {"job_id": job_id, "status": "done"}
+    if job_id is None:
+        job_id = await store.create_job(body.repo_url, ip)
+        if worker:
+            worker.wake()
 
-    job_id = await store.create_job(body.repo_url, ip)
-    if worker:
-        worker.wake()
-    return {"job_id": job_id, "status": "queued"}
+    # The analysis is private to this session (or user)
+    user_analysis_id = None
+    if auth.access_control_enabled():
+        job = await store.get_job(job_id)
+        user_analysis_id = await auth.runtime.auth.add_user_analysis(session, job["analysis_id"], job_id)
+    return auth.attach_new_session(request, JSONResponse(
+        {"job_id": job_id, "status": status, "user_analysis_id": user_analysis_id}
+    ))
+
+
+async def _viewable_job(request: Request, job_id: str):
+    """(job, None) when the caller may see this job, else (None, error response)."""
+    job = await store.get_job(job_id)
+    if auth.access_control_enabled():
+        if not job or not await auth.can_view_analysis(request, job.get("analysis_id")):
+            return None, auth.private_response()
+    elif not job:
+        return None, JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
+    return job, None
+
+
+async def _commit_graph(request: Request, owner: str, repo: str, commit_sha: str):
+    """(graph, None) for repo@sha when the caller may read it, else (None, error response)."""
+    if not auth.access_control_enabled():
+        return await _load_graph(f"{owner}/{repo}", commit_sha), None
+    found = await auth.commit_analysis(request, f"{owner}/{repo}", commit_sha)
+    graph = None
+    if found:
+        graph = await _graph_by_analysis(found["id"], found["repo"], found["commit_sha"], found["schema_version"])
+    if not graph:
+        return None, auth.private_response()
+    return graph, None
 
 
 def _job_event(job: dict) -> dict:
@@ -446,9 +522,10 @@ def _job_event(job: dict) -> dict:
 
 
 @app.get("/jobs/{job_id}")
-async def get_job(job_id: str):
-    if not await store.get_job(job_id):
-        return JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
+async def get_job(job_id: str, request: Request):
+    _job, denied = await _viewable_job(request, job_id)
+    if denied:
+        return denied
 
     async def event_generator():
         while True:
@@ -479,10 +556,10 @@ async def get_job(job_id: str):
 
 
 @app.get("/graph/{job_id}", response_model=GraphResponse)
-async def get_graph(job_id: str):
-    job = await store.get_job(job_id)
-    if not job:
-        return JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
+async def get_graph(job_id: str, request: Request):
+    job, denied = await _viewable_job(request, job_id)
+    if denied:
+        return denied
 
     if job.get("status") != "done":
         return JSONResponse(
@@ -497,18 +574,19 @@ async def get_graph(job_id: str):
             content={"error": "Graph data missing, re-run analysis", "detail": None}
         )
 
+    # Private data: never stored by the CDN (the /api rewrite) or other shared caches
     return JSONResponse(
         status_code=200,
         content=graph,
-        headers={"Cache-Control": "public, max-age=3600"}
+        headers={"Cache-Control": "private, max-age=3600"}
     )
 
 
 @app.get("/analysis/{job_id}")
-async def get_analysis(job_id: str):
-    job = await store.get_job(job_id)
-    if not job:
-        return JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
+async def get_analysis(job_id: str, request: Request):
+    job, denied = await _viewable_job(request, job_id)
+    if denied:
+        return denied
 
     if job.get("status") != "done":
         return JSONResponse(
@@ -530,13 +608,15 @@ async def get_analysis(job_id: str):
 
 
 @app.get("/source/{owner}/{repo}/{commit_sha}/{file_path:path}")
-async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str):
+async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str, request: Request):
     """
     Raw source of one file of an analysed repo, fetched from GitHub. Only paths that are file
     nodes of the stored graph for that repo@sha are served: private repos are never analysed,
     so this cannot be used to read them (or any other file) through the server's token.
     """
-    graph = await _load_graph(f"{owner}/{repo}", commit_sha)
+    graph, denied = await _commit_graph(request, owner, repo, commit_sha)
+    if denied:
+        return denied
     if not graph:
         raise HTTPException(404, "File not found")
     node = next((n for n in graph.get("nodes", []) if n.get("type") == "file" and n.get("id") == file_path), None)
@@ -555,8 +635,10 @@ async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str
 
 
 @app.get("/chat/{owner}/{repo}/{commit_sha}/suggestions")
-async def get_suggestions(owner: str, repo: str, commit_sha: str):
-    graph = await _load_graph(f"{owner}/{repo}", commit_sha)
+async def get_suggestions(owner: str, repo: str, commit_sha: str, request: Request):
+    graph, denied = await _commit_graph(request, owner, repo, commit_sha)
+    if denied:
+        return denied
     if not graph:
         raise HTTPException(404, "Graph data not found in cache")
     return { "suggestions": chat.generate_suggestions(graph) }
@@ -568,7 +650,9 @@ async def chat_with_repo(owner: str, repo: str, commit_sha: str, request: Reques
     Accepts a user question and conversation history.
     Returns a streamed AI response grounded in the repo's graph data.
     """
-    graph = await _load_graph(f"{owner}/{repo}", commit_sha)
+    graph, denied = await _commit_graph(request, owner, repo, commit_sha)
+    if denied:
+        return denied
     if not graph:
         raise HTTPException(404, "Graph data not found in cache. Please re-analyze the repo.")
 
@@ -617,7 +701,9 @@ async def analyze_impact(owner: str, repo: str, commit_sha: str, request: Reques
     Given a changed file/function and blast radius data,
     returns a streaming LLM analysis of the impact.
     """
-    graph = await _load_graph(f"{owner}/{repo}", commit_sha)
+    graph, denied = await _commit_graph(request, owner, repo, commit_sha)
+    if denied:
+        return denied
     if not graph:
         raise HTTPException(404, "Graph data not found in cache")
 

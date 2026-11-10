@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { cn } from '../../lib/cn';
 import { Button, focusRing } from '../../ui';
 import Logo from './Logo';
 import GitHubMark from './GitHubMark';
+import AccountControl from '../AccountControl';
 
 export const REPO_URL = 'https://github.com/shivprasad08/CodeGraph';
 
@@ -15,9 +16,12 @@ const textLink = cn(
 
 /**
  * Sticky 64px nav. The hairline border appears only after the page scrolls.
- * @param {() => void} props.onAnalyzeClick Scrolls to and focuses the repository field.
+ * @param {() => void} [props.onAnalyzeClick] Scrolls to and focuses the repository field
+ *   (landing). Elsewhere "Analyze a repo" goes to the landing page.
+ * @param {boolean} [props.showHowItWorks=true] The in-page link exists only on the landing page.
  */
-export default function SiteNav({ onAnalyzeClick }) {
+export default function SiteNav({ onAnalyzeClick, showHowItWorks = true }) {
+  const navigate = useNavigate();
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -39,21 +43,24 @@ export default function SiteNav({ onAnalyzeClick }) {
           <Logo />
         </Link>
         <div className="flex items-center gap-1 sm:gap-2">
-          <a href="#how-it-works" className={cn(textLink, 'hidden sm:inline-flex')}>
-            How it works
-          </a>
+          {showHowItWorks && (
+            <a href="#how-it-works" className={cn(textLink, 'hidden sm:inline-flex')}>
+              How it works
+            </a>
+          )}
           <a
             href={REPO_URL}
             target="_blank"
             rel="noopener noreferrer"
             aria-label="CodeGraph on GitHub"
-            className={cn(textLink, 'w-9 justify-center px-0 [@media(pointer:coarse)]:w-11')}
+            className={cn(textLink, 'hidden w-9 justify-center px-0 sm:inline-flex [@media(pointer:coarse)]:w-11')}
           >
             <GitHubMark size={18} />
           </a>
-          <Button size="sm" variant="secondary" onClick={onAnalyzeClick}>
+          <Button size="sm" variant="secondary" onClick={onAnalyzeClick ?? (() => navigate('/'))}>
             Analyze a repo
           </Button>
+          <AccountControl />
         </div>
       </nav>
     </header>

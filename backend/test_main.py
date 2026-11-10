@@ -23,7 +23,7 @@ def reset_jobs():
 
 @pytest.fixture
 def client():
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers={"X-CodeGraph": "1"})
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +124,8 @@ async def test_get_graph_done(client):
     response = await client.get("/graph/done-job")
     assert response.status_code == 200
     assert response.json()["repo"] == "a/b"
-    assert "public" in response.headers["cache-control"]
+    # Private: the CDN in front of the API (Vercel rewrite) must never store it
+    assert response.headers["cache-control"].startswith("private")
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,32 @@
-const BASE_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+// The API is always reached through this site's own origin: a Vercel rewrite in production
+// and the Vite proxy in development forward /api/* to the backend (with /api stripped). That
+// keeps the session cookie first-party.
+export const API_BASE = '/api';
+
+// While a shared view (/s/:token) is open, every request carries its share token
+let shareToken = null;
+export function setShareToken(token) {
+  shareToken = token || null;
+}
+
+/** fetch() for the API: same-site credentials, the CSRF header, and the share token if any. */
+export function apiFetch(path, init = {}) {
+  const headers = new Headers(init.headers || {});
+  headers.set('X-CodeGraph', '1');
+  if (shareToken) headers.set('X-Share-Token', shareToken);
+  return fetch(`${API_BASE}${path}`, { credentials: 'same-origin', ...init, headers });
+}
+
+async function errorFrom(response, fallback) {
+  const body = await response.json().catch(() => ({}));
+  const err = new Error(body.error || fallback);
+  err.code = body.error_code ?? (response.status === 429 ? 'rate_limited' : undefined);
+  err.status = response.status;
+  return err;
+}
 
 export async function analyzeRepo(repoUrl) {
-  const response = await fetch(`${BASE_URL}/analyze`, {
+  const response = await apiFetch('/analyze', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json'
@@ -20,50 +45,120 @@ export async function analyzeRepo(repoUrl) {
   return response.json();
 }
 
+/**
+ * Follows a job's progress stream. A fetch() stream rather than EventSource, so a refused
+ * request (403 private_analysis) is reported with its error code instead of "Connection lost".
+ * Returns a function that stops listening.
+ */
 export function subscribeToJob(jobId, onEvent, onError, onDone) {
-  const eventSource = new EventSource(`${BASE_URL}/jobs/${jobId}`);
+  const controller = new AbortController();
+  let finished = false;
+  const finish = (callback) => {
+    if (finished) return;
+    finished = true;
+    callback();
+    controller.abort();
+  };
 
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onEvent(data);
-
-      if (data.status === 'done') {
-        onDone(data);
-        eventSource.close();
-      } else if (data.status === 'error') {
-        onError(data.error, data.error_code ?? null);
-        eventSource.close();
+  apiFetch(`/jobs/${jobId}`, { signal: controller.signal, headers: { Accept: 'text/event-stream' } })
+    .then(async (res) => {
+      if (!res.ok) {
+        const err = await errorFrom(res, 'Connection lost');
+        finish(() => onError(err.message, err.code ?? null));
+        return;
       }
-    } catch (err) {
-      onError('Failed to parse SSE event');
-      eventSource.close();
-    }
-  };
-
-  eventSource.onerror = () => {
-    onError('Connection lost');
-    eventSource.close();
-  };
+      await readSSE(res, (data) => {
+        if (finished) return;
+        onEvent(data);
+        if (data.status === 'done') finish(() => onDone(data));
+        else if (data.status === 'error') finish(() => onError(data.error, data.error_code ?? null));
+      });
+      finish(() => onError('Connection lost'));
+    })
+    .catch(() => finish(() => onError('Connection lost')));
 
   return () => {
-    eventSource.close();
+    finished = true;
+    controller.abort();
   };
 }
 
 export async function fetchGraph(jobId) {
-  const response = await fetch(`${BASE_URL}/graph/${jobId}`);
+  const response = await apiFetch(`/graph/${jobId}`);
 
   if (response.status === 202) {
     throw new Error("Analysis still in progress");
   }
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Failed to fetch graph (${response.status})`);
+    throw await errorFrom(response, `Failed to fetch graph (${response.status})`);
   }
 
   return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// Accounts: session, history, share links
+// ---------------------------------------------------------------------------
+
+/** Where "Sign in with GitHub" goes; `next` is the page to come back to. */
+export function signInUrl(next = '/analyses') {
+  return `${API_BASE}/auth/github/login?next=${encodeURIComponent(next)}`;
+}
+
+/** The signed-in user ({ login, name, avatar_url }) or null. */
+export async function fetchMe() {
+  const res = await apiFetch('/auth/me');
+  if (res.status === 401) return null;
+  if (!res.ok) throw await errorFrom(res, 'Could not check sign-in');
+  return (await res.json()).user;
+}
+
+export async function signOut() {
+  const res = await apiFetch('/auth/logout', { method: 'POST' });
+  if (!res.ok) throw await errorFrom(res, 'Could not sign out');
+}
+
+/** { signed_in, analyses: [...] } for this browser's session (signed in or not). */
+export async function fetchMyAnalyses() {
+  const res = await apiFetch('/me/analyses');
+  if (!res.ok) throw await errorFrom(res, 'Could not load your analyses');
+  return res.json();
+}
+
+export async function removeMyAnalysis(userAnalysisId) {
+  const res = await apiFetch(`/me/analyses/${userAnalysisId}`, { method: 'DELETE' });
+  if (!res.ok) throw await errorFrom(res, 'Could not remove the analysis');
+}
+
+/** expiresInDays: 7, 30 or null (never). Resolves with { id, url, expires_at }. */
+export async function createShare(userAnalysisId, expiresInDays) {
+  const res = await apiFetch('/shares', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_analysis_id: userAnalysisId, expires_in_days: expiresInDays }),
+  });
+  if (!res.ok) throw await errorFrom(res, 'Could not create the link');
+  return res.json();
+}
+
+export async function listShares(userAnalysisId) {
+  const query = userAnalysisId ? `?user_analysis_id=${encodeURIComponent(userAnalysisId)}` : '';
+  const res = await apiFetch(`/me/shares${query}`);
+  if (!res.ok) throw await errorFrom(res, 'Could not load your links');
+  return (await res.json()).shares;
+}
+
+export async function revokeShare(shareId) {
+  const res = await apiFetch(`/shares/${shareId}`, { method: 'DELETE' });
+  if (!res.ok) throw await errorFrom(res, 'Could not turn off the link');
+}
+
+/** { share, graph } for a share link token; throws with code 'share_unavailable' when it is gone. */
+export async function fetchShare(token) {
+  const res = await apiFetch(`/shares/${encodeURIComponent(token)}`);
+  if (!res.ok) throw await errorFrom(res, 'This link is no longer available.');
+  return res.json();
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +311,7 @@ export async function fetchFileSource(repoFullName, commitSha, filePath, hooks =
     return await withCacheRecovery(
       repoFullName,
       commitSha,
-      async (sha) => (await ensureOk(await fetch(`${BASE_URL}/source/${repoFullName}/${sha}/${encodedPath}`))).json(),
+      async (sha) => (await ensureOk(await apiFetch(`/source/${repoFullName}/${sha}/${encodedPath}`))).json(),
       hooks,
     );
   } catch (err) {
@@ -244,7 +339,7 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
     commitSha,
     async (sha) =>
       ensureOk(
-        await fetch(`${BASE_URL}/chat/${repoFullName}/${sha}`, {
+        await apiFetch(`/chat/${repoFullName}/${sha}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message, history }),
@@ -276,7 +371,7 @@ export function streamChatMessage(repoFullName, commitSha, message, history, onT
 export async function fetchChatSuggestions(repoFullName, commitSha) {
   try {
     const sha = currentCommit(repoFullName, commitSha);
-    const res = await fetch(`${BASE_URL}/chat/${repoFullName}/${sha}/suggestions`);
+    const res = await apiFetch(`/chat/${repoFullName}/${sha}/suggestions`);
     if (!res.ok) return [];
     const data = await res.json();
     return data.suggestions || [];
@@ -286,7 +381,7 @@ export async function fetchChatSuggestions(repoFullName, commitSha) {
 }
 
 export async function fetchAnalysis(jobId) {
-  const res = await fetch(`${BASE_URL}/analysis/${jobId}`);
+  const res = await apiFetch(`/analysis/${jobId}`);
   if (!res.ok) return null;
   return res.json();
 }
@@ -304,7 +399,7 @@ export function streamImpactAnalysis(
     commitSha,
     async (sha) =>
       ensureOk(
-        await fetch(`${BASE_URL}/impact/${repoFullName}/${sha}`, {
+        await apiFetch(`/impact/${repoFullName}/${sha}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

@@ -43,6 +43,16 @@ DATABASE_URL_DIRECT = os.getenv("DATABASE_URL_DIRECT") or None
 # Render sets RENDER on its services; there the database is required
 IS_PRODUCTION = bool(os.getenv("RENDER"))
 
+# GitHub sign-in (an OAuth App; callback: PUBLIC_APP_URL + /api/auth/github/callback).
+# SESSION_SECRET signs the short-lived OAuth state cookie. All secrets: never log them.
+GITHUB_OAUTH_CLIENT_ID = os.getenv("GITHUB_OAUTH_CLIENT_ID") or None
+GITHUB_OAUTH_CLIENT_SECRET = os.getenv("GITHUB_OAUTH_CLIENT_SECRET") or None
+SESSION_SECRET = os.getenv("SESSION_SECRET") or None
+# The frontend's origin; the API is reached through it (/api rewrite), so cookies are first-party
+PUBLIC_APP_URL = (os.getenv("PUBLIC_APP_URL") or "http://localhost:5173").rstrip("/")
+# Analyses per hour: signed-in users, and anonymous sessions (also per IP)
+ANALYZE_LIMIT_SIGNED_IN = int(os.getenv("ANALYZE_LIMIT_SIGNED_IN", 30))
+
 def validate_config():
     errors = []
     if not GITHUB_TOKEN:
@@ -55,6 +65,12 @@ def validate_config():
         errors.append("DATABASE_URL is not set (Neon pooled connection string)")
     if IS_PRODUCTION and not DATABASE_URL_DIRECT:
         errors.append("DATABASE_URL_DIRECT is not set (Neon direct connection string, for migrations)")
+    if IS_PRODUCTION:
+        for name in ("GITHUB_OAUTH_CLIENT_ID", "GITHUB_OAUTH_CLIENT_SECRET", "SESSION_SECRET", "PUBLIC_APP_URL"):
+            if not os.getenv(name):
+                errors.append(f"{name} is not set (GitHub sign-in)")
+        if SESSION_SECRET and len(SESSION_SECRET) < 32:
+            errors.append("SESSION_SECRET must be at least 32 characters")
     if errors:
         for e in errors:
             print(f"[config] FATAL: {e}")

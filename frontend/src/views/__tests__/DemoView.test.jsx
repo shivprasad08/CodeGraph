@@ -19,6 +19,10 @@ vi.mock('../../api', () => {
     fetchChatSuggestions: fail('fetchChatSuggestions'),
     fetchAnalysis: fail('fetchAnalysis'),
     streamImpactAnalysis: fail('streamImpactAnalysis'),
+    // The top bar asks who is signed in (not an analysis request): signed out
+    fetchMe: vi.fn(async () => null),
+    signOut: vi.fn(async () => {}),
+    signInUrl: (next) => `/api/auth/github/login?next=${encodeURIComponent(next)}`,
   };
 });
 // The canvas renderer needs a real browser; everything else renders for real
@@ -141,7 +145,8 @@ describe('/demo app view', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(DEMO_DATA_URL);
     for (const [name, fn] of Object.entries(api)) {
-      expect(fn, name).not.toHaveBeenCalled();
+      if (name === 'fetchMe') continue; // the top bar's sign-in check; no analysis data
+      if (typeof fn === 'function' && 'mock' in fn) expect(fn, name).not.toHaveBeenCalled();
     }
   });
 

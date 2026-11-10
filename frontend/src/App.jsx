@@ -5,6 +5,8 @@ import LandingPageView from './views/LandingPageView';
 // Graph views pull in react-force-graph; keep them out of the landing bundle
 const ShareableGraphView = lazy(() => import('./views/ShareableGraphView'));
 const DemoView = lazy(() => import('./views/DemoView'));
+const SharedView = lazy(() => import('./views/SharedView'));
+const AnalysesView = lazy(() => import('./views/AnalysesView'));
 // Dev-only design-system catalog
 const StyleGuideView = lazy(() => import('./views/StyleGuideView'));
 
@@ -25,6 +27,8 @@ export default function App() {
       <Routes>
         <Route path="/" element={<LandingPageView />} />
         <Route path="/demo" element={<DemoView />} />
+        <Route path="/analyses" element={<AnalysesView />} />
+        <Route path="/s/:token" element={<SharedView />} />
         <Route path="/graph/:owner/:repo" element={<RepoLinkRedirect />} />
         <Route path="/graph/:owner/:repo/jobs/:jobId" element={<ShareableGraphView />} />
         {showDevRoutes && <Route path="/dev/ui" element={<StyleGuideView />} />}

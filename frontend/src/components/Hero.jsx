@@ -14,8 +14,9 @@ const INVALID_REPO = 'Enter a repository as owner/repo, for example psf/requests
  * @param {(repoPath: string) => Promise<void>} props.onAnalyze Starts the analysis for "owner/repo".
  *   Should navigate on success and throw an Error with a readable message on failure.
  * @param {import('react').Ref<HTMLInputElement>} [props.inputRef] Lets the nav focus the field.
+ * @param {() => void} [props.onSignIn] When given (signed out), a line under the field offers sign-in.
  */
-export default function Hero({ onAnalyze, inputRef, initialRepo = '' }) {
+export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }) {
   const [value, setValue] = useState(initialRepo);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -118,6 +119,23 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '' }) {
             {slow ? 'Waking up the server — the first request can take up to a minute.' : ''}
           </p>
         </form>
+        {onSignIn && (
+          <p className="text-cg-sm text-cg-secondary">
+            <button
+              type="button"
+              onClick={onSignIn}
+              className={cn(
+                'rounded text-cg-text underline decoration-cg-border-strong underline-offset-4',
+                'transition-colors duration-cg-fast ease-cg hover:decoration-cg-text',
+                '[@media(pointer:coarse)]:inline-flex [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:items-center',
+                focusRing,
+              )}
+            >
+              Sign in with GitHub
+            </button>{' '}
+            to save and share your analyses.
+          </p>
+        )}
 
         <p className="mt-4 text-cg-sm text-cg-secondary">
           <span className="text-cg-tertiary">Try </span>

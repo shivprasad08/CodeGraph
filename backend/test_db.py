@@ -36,7 +36,7 @@ async def pg():
     await db.run_migrations(TEST_URL)
     s = await store_mod.PgStore.open(TEST_URL)
     async with s.pool.connection() as conn:
-        await conn.execute("truncate jobs, analyses")
+        await conn.execute("truncate jobs, analyses, users, sessions, user_analyses, share_links, rate_events cascade")
     try:
         yield s
     finally:
@@ -50,7 +50,7 @@ async def api(pg, tmp_path, monkeypatch):
     monkeypatch.setattr(main.cache.config, "CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(main, "SSE_POLL_SECONDS", 0.1)
     main.analyze_counts.clear()
-    async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test", headers={"X-CodeGraph": "1"}) as client:
         yield client
 
 

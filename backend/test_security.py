@@ -24,7 +24,7 @@ def reset_state():
 
 @pytest.fixture
 def client():
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers={"X-CodeGraph": "1"})
 
 
 # ---------------------------------------------------------------------------

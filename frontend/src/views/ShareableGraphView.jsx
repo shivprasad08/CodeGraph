@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { FileX, Lock, TriangleAlert, X } from 'lucide-react';
+import { currentPath, signIn, useSession } from '../lib/session';
 import { analyzeRepo, fetchAnalysis, fetchGraph, subscribeToJob } from '../api';
 import { buildDirectoryColorMap } from '../utils/directoryColors';
 import { fileColorToken, moduleColoring } from '../lib/moduleColors';
@@ -78,20 +79,26 @@ function CenterMessage({ icon, title, body, actions }) {
 /**
  * Graph app view. With `staticData` (a saved /graph response) it renders that graph
  * without calling the backend; features that need the server show a short note.
+ * With `staticData` and `shared` ({ sharedBy, expiresAt }) it is a shared view: the graph
+ * came from a share link, the server features work (with the share token), and Re-run
+ * and Share are hidden.
  */
-export default function ShareableGraphView({ staticData = null } = {}) {
+export default function ShareableGraphView({ staticData = null, shared = null } = {}) {
   const params = useParams();
-  const offline = Boolean(staticData);
-  const [owner, repo] = offline ? (staticData.repo || '/').split('/') : [params.owner, params.repo];
-  const jobId = offline ? undefined : params.jobId;
+  const preloaded = Boolean(staticData);
+  const offline = preloaded && !shared;
+  const readOnly = offline || Boolean(shared);
+  const [owner, repo] = preloaded ? (staticData.repo || '/').split('/') : [params.owner, params.repo];
+  const jobId = preloaded ? undefined : params.jobId;
   const navigate = useNavigate();
   const isMobile = useIsMobile();
+  const session = useSession();
 
   // ---- Data -----------------------------------------------------------------
   const [graphData, setGraphData] = useState(staticData);
   const [analysis, setAnalysis] = useState(staticData?.analysis ?? null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
-  const [jobStatus, setJobStatus] = useState(offline ? 'done' : null);
+  const [jobStatus, setJobStatus] = useState(preloaded ? 'done' : null);
   const [error, setError] = useState(null);
   const [errorCode, setErrorCode] = useState(null); // "no_source", "file_limit"… from the job stream
   const [progress, setProgress] = useState(0);
@@ -101,8 +108,8 @@ export default function ShareableGraphView({ staticData = null } = {}) {
 
   useEffect(() => {
     document.title = `CodeGraph — ${owner}/${repo}`;
-    // Static demo: the graph is already loaded and there is no backend to call
-    if (offline) return undefined;
+    // Demo or shared view: the graph is already loaded
+    if (preloaded) return undefined;
 
     const loadAnalysis = (graph, id) => {
       if (graph.analysis) setAnalysis(graph.analysis);
@@ -138,6 +145,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
             loadAnalysis(finalGraph, jobId);
           } catch (err) {
             setError(err.message || 'The graph could not be loaded after the analysis finished');
+            setErrorCode(err.code ?? null);
             setJobStatus('error');
           }
         },
@@ -145,7 +153,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
     }
 
     return undefined;
-  }, [owner, repo, jobId, navigate, offline]);
+  }, [owner, repo, jobId, navigate, preloaded]);
 
   const dirColorMap = useMemo(() => (graphData ? buildDirectoryColorMap(graphData.nodes) : {}), [graphData]);
   // One colour per architecture module: graph canvas, architecture view and file tree agree
@@ -331,7 +339,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
   };
 
   const rerun = async () => {
-    if (offline || rerunning) return;
+    if (readOnly || rerunning) return;
     setRerunning(true);
     setNotice(null);
     try {
@@ -417,6 +425,32 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       {owner}/{repo}
     </span>
   );
+
+  // Someone else's analysis (or one that no longer exists): nothing about it is shown
+  if (error && errorCode === 'private_analysis') {
+    return (
+      <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
+        <TopBarFrame repoLabel={repoCrumb} />
+        <CenterMessage
+          icon={<Lock size={24} strokeWidth={1.5} aria-hidden="true" className="mx-auto text-cg-tertiary" />}
+          title="This analysis is private"
+          body={
+            session.status === 'signed_in'
+              ? 'Only the person who ran it can open it, or someone they send a share link to. You can run your own analysis of this repository.'
+              : 'Only the person who ran it can open it, or someone they send a share link to. If you ran it, sign in with the GitHub account you used.'
+          }
+          actions={
+            <>
+              <Button variant="primary" onClick={() => navigate(`/?repo=${encodeURIComponent(`${owner}/${repo}`)}`)}>
+                Analyze this repo
+              </Button>
+              {session.status === 'signed_out' && <Button onClick={() => signIn(currentPath())}>Sign in</Button>}
+            </>
+          }
+        />
+      </div>
+    );
+  }
 
   if (error && errorCode === 'private_repo') {
     return (
@@ -521,8 +555,8 @@ export default function ShareableGraphView({ staticData = null } = {}) {
       onBlastRadiusChange={setBlastRadius}
       onSimulationModeChange={setSimulationMode}
       onAnalyzeOwn={() => navigate('/')}
-      onRerun={offline ? undefined : rerun}
-      onReloadGraph={offline ? undefined : reloadGraph}
+      onRerun={readOnly ? undefined : rerun}
+      onReloadGraph={readOnly ? undefined : reloadGraph}
       dirColorMap={dirColorMap}
       onDiagramNodeClick={handleDiagramNode}
     />
@@ -590,7 +624,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
             graph={graphData}
             dirColorMap={dirColorMap}
             onNodeClick={handleDiagramNode}
-            onRerun={offline ? undefined : rerun}
+            onRerun={readOnly ? undefined : rerun}
             rerunning={rerunning}
           />
         )}
@@ -610,7 +644,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
             repo={`${owner}/${repo}`}
             commitSha={graphData?.commit_sha}
             offline={offline}
-            onRerun={offline ? undefined : rerun}
+            onRerun={readOnly ? undefined : rerun}
           />
         )}
       </div>
@@ -630,7 +664,9 @@ export default function ShareableGraphView({ staticData = null } = {}) {
         owner={owner}
         repo={repo}
         commitSha={graphData.commit_sha}
+        jobId={jobId}
         offline={offline}
+        shared={shared}
         isMobile={isMobile}
         leftOpen={isMobile ? filesSheet : leftOpen}
         rightOpen={isMobile ? inspectorSheet : rightOpen}

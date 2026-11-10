@@ -318,8 +318,13 @@ class PgStore:
                     return False
                 await self._finish_on(conn, job_id, existing, CACHED_MESSAGE)
                 if own and own != existing:
-                    await conn.execute("delete from analyses where id = %s and status <> 'done'", (own,))
+                    await self._drop_placeholder(conn, own, existing)
                 return True
+
+    async def _drop_placeholder(self, conn, placeholder, target) -> None:
+        """The job now uses `target`: owners of the placeholder move with it, then it is deleted."""
+        await conn.execute("update user_analyses set analysis_id = %s where analysis_id = %s", (target, placeholder))
+        await conn.execute("delete from analyses where id = %s and status <> 'done'", (placeholder,))
 
     async def _finish_on(self, conn, job_id: str, analysis_id, message: str) -> None:
         await conn.execute(
@@ -335,6 +340,7 @@ class PgStore:
 
         blob = db.compress_graph(graph)
         stats, languages = graph.get("stats"), graph.get("languages")
+        health = graph.get("analysis") or {}
         async with self.pool.connection() as conn:
             async with conn.transaction():
                 cur = await conn.execute("select analysis_id from jobs where id = %s", (job_id,))
@@ -344,9 +350,10 @@ class PgStore:
                     async with conn.transaction():  # savepoint: another job may have finished this commit first
                         await conn.execute(
                             "update analyses set repo = %s, commit_sha = %s, schema_version = %s, status = 'done',"
-                            " graph_gz = %s, stats = %s, languages = %s, error = null, error_code = null,"
-                            " finished_at = now(), updated_at = now() where id = %s",
-                            (repo, sha, GRAPH_SCHEMA_VERSION, blob, Jsonb(stats), Jsonb(languages), own),
+                            " graph_gz = %s, stats = %s, languages = %s, health_score = %s, health_grade = %s,"
+                            " error = null, error_code = null, finished_at = now(), updated_at = now() where id = %s",
+                            (repo, sha, GRAPH_SCHEMA_VERSION, blob, Jsonb(stats), Jsonb(languages),
+                             health.get("score"), health.get("grade"), own),
                         )
                 except errors.UniqueViolation:
                     cur = await conn.execute(
@@ -357,7 +364,7 @@ class PgStore:
                     target = (await cur.fetchone())["id"]
                 await self._finish_on(conn, job_id, target, "Analysis complete")
                 if own and target != own:
-                    await conn.execute("delete from analyses where id = %s and status <> 'done'", (own,))
+                    await self._drop_placeholder(conn, own, target)
         logger.info(f"[store] saved {repo}@{sha}: {len(blob) / 1024:.1f} KB compressed")
 
     async def fail_job(self, job_id: str, error: str, error_code: str | None = None) -> None:
@@ -459,5 +466,12 @@ class PgStore:
                 (GRAPH_SCHEMA_VERSION,),
             )
             old_schema = cur.rowcount
-        logger.info(f"[retention] deleted {unfinished} unfinished and {old_schema} old-schema analyses")
+            cur = await conn.execute("delete from sessions where expires_at < now()")
+            sessions = cur.rowcount
+            cur = await conn.execute("delete from rate_events where at < now() - interval '1 day'")
+            rate_events = cur.rowcount
+        logger.info(
+            f"[retention] deleted {unfinished} unfinished and {old_schema} old-schema analyses,"
+            f" {sessions} expired sessions, {rate_events} old rate events"
+        )
         return {"unfinished": unfinished, "old_schema": old_schema}

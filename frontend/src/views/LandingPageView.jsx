@@ -1,9 +1,12 @@
 // Page pattern: marketing landing — nav, hero with the primary action, live product demo,
 // how it works, feature rows, stack, honest limits, footer.
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { X } from 'lucide-react';
+import { IconButton } from '../ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { normalizeRepoInput } from '../lib/repoInput';
 import { analyzeRepo } from '../api';
+import { signIn, useSession } from '../lib/session';
 import Hero from '../components/Hero';
 import SiteNav from '../components/landing/SiteNav';
 import LiveDemo from '../components/landing/LiveDemo';
@@ -13,6 +16,13 @@ import SiteFooter from '../components/landing/SiteFooter';
 import Reveal from '../components/landing/Reveal';
 
 const STACK = ['tree-sitter', 'networkx', 'FastAPI', 'SSE streaming', 'commit-SHA cache', 'Groq / Mistral'];
+
+// Where the GitHub sign-in callback sends people back when it did not complete
+const SIGNIN_NOTICES = {
+  failed: "Sign-in didn't complete. Try again, or keep using CodeGraph without an account.",
+  cancelled: 'Sign-in was cancelled. You can still analyze repositories without an account.',
+  unavailable: "Sign-in isn't available right now. You can still analyze repositories without an account.",
+};
 
 const LIMITS = [
   'Full support: Python. Basic support: JavaScript, TypeScript, Java, Go, Rust, C/C++, C#, Ruby, PHP and more.',
@@ -24,9 +34,11 @@ const LIMITS = [
 export default function LandingPageView() {
   const navigate = useNavigate();
   const inputRef = useRef(null);
+  const { status } = useSession();
   // A shared /graph/owner/repo link lands here with the repo prefilled (?repo=owner/repo)
   const [searchParams] = useSearchParams();
   const prefilledRepo = normalizeRepoInput(searchParams.get('repo') ?? '') || '';
+  const [signinNotice, setSigninNotice] = useState(() => SIGNIN_NOTICES[searchParams.get('signin')] ?? '');
   useEffect(() => {
     if (prefilledRepo) inputRef.current?.focus();
   }, [prefilledRepo]);
@@ -60,7 +72,22 @@ export default function LandingPageView() {
       </a>
       <SiteNav onAnalyzeClick={focusRepoInput} />
       <main id="main" className="flex flex-col gap-16 pb-16 md:gap-28 md:pb-28">
-        <Hero onAnalyze={handleAnalyze} inputRef={inputRef} initialRepo={prefilledRepo} />
+        {signinNotice && (
+          <div className="mx-auto -mb-10 mt-4 w-full max-w-[560px] px-4 md:-mb-20">
+            <p role="status" className="flex items-start gap-2 rounded-cg-control border border-cg-border bg-cg-raised py-2 pl-3 pr-1 text-cg-sm text-cg-text">
+              <span className="flex-1">{signinNotice}</span>
+              <IconButton label="Dismiss" size="sm" tooltip={false} onClick={() => setSigninNotice('')}>
+                <X size={16} strokeWidth={1.5} aria-hidden="true" />
+              </IconButton>
+            </p>
+          </div>
+        )}
+        <Hero
+          onAnalyze={handleAnalyze}
+          inputRef={inputRef}
+          initialRepo={prefilledRepo}
+          onSignIn={status === 'signed_out' ? () => signIn() : undefined}
+        />
         <LiveDemo />
         <HowItWorks />
         <FeatureRows />

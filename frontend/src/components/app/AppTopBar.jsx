@@ -1,24 +1,30 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { Check, Ellipsis, ExternalLink, FolderTree, Link2, PanelLeft, PanelRight, Plus, RotateCw, Search } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import {
+  Check, Ellipsis, ExternalLink, FolderTree, History, Link2, LogOut, PanelLeft, PanelRight, Plus, RotateCw, Search, Share2,
+} from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { MOD_KEY } from '../../lib/hotkeys';
+import { currentPath, signIn, signOutAndForget, useSession } from '../../lib/session';
 import { Button, IconButton, Kbd, Tooltip, focusRing } from '../../ui';
-import { Menu, MenuContent, MenuItem, MenuTrigger } from '../../ui/Menu';
+import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '../../ui/Menu';
 import { LogoMark } from '../landing/Logo';
+import GitHubMark from '../landing/GitHubMark';
+import AccountControl from '../AccountControl';
+import Avatar from '../Avatar';
+import ShareDialog, { formatDate } from './ShareDialog';
 
-// Until real share links exist, the link opens CodeGraph with this repo ready to analyze
-const SHARE_LABEL = 'Copy analyze link';
-const SHARE_TOOLTIP = 'Opens CodeGraph with this repo ready to analyze';
-const SHARE_COPIED = 'Copied';
-const SHARE_ANNOUNCE = 'Link copied — opens with this repo ready to analyze';
+// The public demo has no share links: its address is the link
+const DEMO_COPY = 'Copy link';
+const DEMO_COPIED = 'Copied';
+const DEMO_ANNOUNCE = 'Link to the demo copied';
 
 /** Both labels share one grid cell, so the button keeps the width of the longer one. */
-function ShareLabel({ copied }) {
+function StableLabel({ label, alt, showAlt }) {
   return (
     <span className="inline-grid">
-      <span className={cn('col-start-1 row-start-1', copied && 'invisible')}>{SHARE_LABEL}</span>
-      <span className={cn('col-start-1 row-start-1', !copied && 'invisible')}>{SHARE_COPIED}</span>
+      <span className={cn('col-start-1 row-start-1', showAlt && 'invisible')}>{label}</span>
+      <span className={cn('col-start-1 row-start-1', !showAlt && 'invisible')}>{alt}</span>
     </span>
   );
 }
@@ -61,15 +67,37 @@ export function TopBarFrame({ repoLabel, children }) {
   );
 }
 
+/** "Shared by @login · expires Nov 17, 2026" for a shared (read-only) view. */
+export function SharedChip({ shared, className }) {
+  const expiry = shared.expiresAt ? `expires ${formatDate(shared.expiresAt)}` : 'never expires';
+  return (
+    <span
+      className={cn(
+        'inline-flex h-7 min-w-0 items-center gap-1.5 rounded-cg-control border border-cg-border px-2 text-cg-xs text-cg-secondary',
+        className,
+      )}
+    >
+      <Avatar user={shared.sharedBy} size={16} />
+      <span className="truncate">
+        Shared by <span className="text-cg-text">@{shared.sharedBy?.login}</span> · {expiry}
+      </span>
+    </span>
+  );
+}
+
 /**
- * 48px app bar: logo / repo / commit · search · panel toggles, share, re-run, new.
+ * 48px app bar: logo / repo / commit · search · panel toggles, share, re-run, new, account.
  * Under 768px the panel toggles open sheets and the actions move into a menu.
+ * @param {object} [props.shared] Read-only shared view: { sharedBy: {login, avatar_url}, expiresAt }.
+ *   Share and Re-run are hidden.
  */
 export default function AppTopBar({
   owner,
   repo,
   commitSha,
+  jobId,
   offline,
+  shared,
   isMobile,
   leftOpen,
   rightOpen,
@@ -80,11 +108,22 @@ export default function AppTopBar({
   rerunning,
   onNew,
 }) {
-  const [shareCopied, copyShare] = useCopied();
+  const navigate = useNavigate();
+  const { status, user } = useSession();
+  const [demoCopied, copyDemo] = useCopied();
   const [shaCopied, copySha] = useCopied();
-  const shareUrl = offline ? `${window.location.origin}/demo` : `${window.location.origin}/graph/${owner}/${repo}`;
-  const shareIcon = shareCopied ? <Check {...icon} /> : <Link2 {...icon} />;
+  const [shareOpen, setShareOpen] = useState(false);
+  const readOnly = Boolean(shared);
   const rerunLabel = offline ? 'Re-run is available on your own analyses' : 'Re-run analysis';
+  const signedIn = status === 'signed_in';
+  const demoIcon = demoCopied ? <Check {...icon} /> : <Link2 {...icon} />;
+
+  const share = () => {
+    if (offline) copyDemo(`${window.location.origin}/demo`);
+    else if (signedIn) setShareOpen(true);
+    else signIn(currentPath());
+  };
+  const shareLabel = signedIn ? 'Share' : 'Sign in to share';
 
   const repoLabel = (
     <div className="flex min-w-0 items-center gap-2">
@@ -112,6 +151,7 @@ export default function AppTopBar({
           </button>
         </Tooltip>
       )}
+      {shared && !isMobile && <SharedChip shared={shared} className="hidden lg:inline-flex" />}
     </div>
   );
 
@@ -155,15 +195,49 @@ export default function AppTopBar({
                 </IconButton>
               </MenuTrigger>
               <MenuContent align="end">
-                <MenuItem icon={shareIcon} onSelect={() => copyShare(shareUrl)}>
-                  <ShareLabel copied={shareCopied} />
-                </MenuItem>
-                <MenuItem icon={<RotateCw {...icon} />} onSelect={onRerun} disabled={offline || rerunning}>
-                  {rerunLabel}
-                </MenuItem>
+                {shared && (
+                  <div className="max-w-64 px-2 pb-1.5 pt-1 text-cg-xs text-cg-tertiary">
+                    Shared by <span className="text-cg-secondary">@{shared.sharedBy?.login}</span> ·{' '}
+                    {shared.expiresAt ? `expires ${formatDate(shared.expiresAt)}` : 'never expires'}
+                  </div>
+                )}
+                {!readOnly && (
+                  <MenuItem icon={offline ? demoIcon : <Share2 {...icon} />} onSelect={share} disabled={!offline && status === 'loading'}>
+                    {offline ? <StableLabel label={DEMO_COPY} alt={DEMO_COPIED} showAlt={demoCopied} /> : status === 'loading' ? 'Share' : shareLabel}
+                  </MenuItem>
+                )}
+                {!readOnly && (
+                  <MenuItem icon={<RotateCw {...icon} />} onSelect={onRerun} disabled={offline || rerunning}>
+                    {rerunLabel}
+                  </MenuItem>
+                )}
                 <MenuItem icon={<Plus {...icon} />} onSelect={onNew}>
                   New analysis
                 </MenuItem>
+                <MenuSeparator />
+                {signedIn ? (
+                  <>
+                    <div className="flex items-center gap-2 px-2 py-1 text-cg-xs text-cg-tertiary">
+                      <Avatar user={user} size={16} /> @{user.login}
+                    </div>
+                    <MenuItem icon={<History {...icon} />} onSelect={() => navigate('/analyses')}>
+                      My analyses
+                    </MenuItem>
+                    <MenuItem
+                      icon={<LogOut {...icon} />}
+                      onSelect={async () => {
+                        await signOutAndForget().catch(() => {});
+                        navigate('/');
+                      }}
+                    >
+                      Sign out
+                    </MenuItem>
+                  </>
+                ) : (
+                  <MenuItem icon={<GitHubMark size={16} />} onSelect={() => signIn(currentPath())} disabled={status === 'loading'}>
+                    Sign in with GitHub
+                  </MenuItem>
+                )}
               </MenuContent>
             </Menu>
           </>
@@ -176,31 +250,52 @@ export default function AppTopBar({
               <PanelRight {...icon} />
             </IconButton>
             <span aria-hidden="true" className="mx-1 h-5 w-px bg-cg-border" />
-            <Tooltip content={SHARE_TOOLTIP}>
-              <span className="inline-flex">
-                <Button size="sm" variant="secondary" onClick={() => copyShare(shareUrl)} leadingIcon={shareIcon}>
-                  <ShareLabel copied={shareCopied} />
+            {shared && <SharedChip shared={shared} className="mr-1 lg:hidden" />}
+            {!readOnly &&
+              (offline ? (
+                <Tooltip content="Copy a link to this demo">
+                  <span className="inline-flex">
+                    <Button size="sm" variant="secondary" onClick={share} leadingIcon={demoIcon}>
+                      <StableLabel label={DEMO_COPY} alt={DEMO_COPIED} showAlt={demoCopied} />
+                    </Button>
+                  </span>
+                </Tooltip>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={share}
+                  disabled={status === 'loading'}
+                  leadingIcon={signedIn ? <Share2 {...icon} /> : <GitHubMark size={16} />}
+                >
+                  {status === 'loading' ? 'Share' : shareLabel}
                 </Button>
-              </span>
-            </Tooltip>
-            <Tooltip content={rerunLabel}>
-              {/* span keeps the tooltip working while the button is disabled */}
-              <span className="inline-flex">
-                <IconButton label="Re-run analysis" tooltip={false} onClick={onRerun} disabled={offline || rerunning}>
-                  <RotateCw {...icon} className={rerunning ? 'motion-safe:animate-spin' : undefined} />
-                </IconButton>
-              </span>
-            </Tooltip>
+              ))}
+            {!readOnly && (
+              <Tooltip content={rerunLabel}>
+                {/* span keeps the tooltip working while the button is disabled */}
+                <span className="inline-flex">
+                  <IconButton label="Re-run analysis" tooltip={false} onClick={onRerun} disabled={offline || rerunning}>
+                    <RotateCw {...icon} className={rerunning ? 'motion-safe:animate-spin' : undefined} />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
             <IconButton label="New analysis" onClick={onNew}>
               <Plus {...icon} />
             </IconButton>
+            <span aria-hidden="true" className="mx-1 h-5 w-px bg-cg-border" />
+            <AccountControl compact />
           </>
         )}
       </div>
       {/* Outside the menu, so the announcement survives the menu closing */}
       <span className="sr-only" aria-live="polite">
-        {shareCopied ? SHARE_ANNOUNCE : ''}
+        {demoCopied ? DEMO_ANNOUNCE : ''}
       </span>
+      {!offline && !readOnly && signedIn && (
+        <ShareDialog open={shareOpen} onOpenChange={setShareOpen} repo={`${owner}/${repo}`} commitSha={commitSha} jobId={jobId} />
+      )}
     </TopBarFrame>
   );
 }
