@@ -97,6 +97,21 @@ export async function fetchGraph(jobId) {
   return response.json();
 }
 
+/** A finished PR impact result (throws with .code/.status: 'private_analysis', 202 while running). */
+export async function fetchPR(jobId) {
+  const res = await apiFetch(`/pr/${jobId}`);
+  if (res.status === 202) throw Object.assign(new Error('Analysis still in progress'), { status: 202 });
+  if (!res.ok) throw await errorFrom(res, `Failed to load the PR analysis (${res.status})`);
+  return res.json();
+}
+
+/** The full base or head graph of a PR analysis ("show full graph"). */
+export async function fetchPRGraph(jobId, side = 'head') {
+  const res = await apiFetch(`/pr/${jobId}/graph/${side}`);
+  if (!res.ok) throw await errorFrom(res, 'Could not load the full graph');
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Accounts: session, history, share links
 // ---------------------------------------------------------------------------

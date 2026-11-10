@@ -12,6 +12,7 @@ import { Button, Dialog, DialogClose, DialogContent, IconButton, Spinner, button
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger } from '../ui/Menu';
 import SiteNav from '../components/landing/SiteNav';
 import ShareDialog, { formatDate } from '../components/app/ShareDialog';
+import { RISK_LEVEL } from '../lib/risk';
 
 const icon = { size: 16, strokeWidth: 1.5, 'aria-hidden': true };
 
@@ -26,10 +27,19 @@ function topLanguages(languages) {
 
 function openPath(a) {
   const [owner, repo] = a.repo.split('/');
-  return a.job_id ? `/graph/${owner}/${repo}/jobs/${a.job_id}` : null;
+  if (!a.job_id) return null;
+  return a.kind === 'pr' ? `/pr/${owner}/${repo}/${a.pr_number}/jobs/${a.job_id}` : `/graph/${owner}/${repo}/jobs/${a.job_id}`;
 }
 
 function StatusText({ a }) {
+  if (a.status === 'done' && a.kind === 'pr') {
+    const level = RISK_LEVEL[a.risk_level];
+    return level ? (
+      <span>
+        <span className={level.className}>{level.word}</span> <span className="text-cg-tertiary">({a.risk_score})</span>
+      </span>
+    ) : null;
+  }
   if (a.status === 'done') {
     // Analyses saved before scores were stored have none to show
     return a.health_score == null ? null : (
@@ -66,12 +76,19 @@ function Row({ a, signedIn, onShare, onRemove }) {
           ) : (
             <span className="min-w-0 truncate font-cg-mono text-cg-base text-cg-text">{a.repo}</span>
           )}
-          {a.commit_sha && (
-            <span className="h-5 shrink-0 rounded border border-cg-border px-1.5 font-cg-mono text-cg-xs leading-[18px] text-cg-tertiary">
-              {a.commit_sha.slice(0, 8)}
+          {a.kind === 'pr' ? (
+            <span className="h-5 shrink-0 rounded border border-cg-border-strong px-1.5 font-cg-mono text-cg-xs leading-[18px] text-cg-secondary">
+              PR #{a.pr_number}
             </span>
+          ) : (
+            a.commit_sha && (
+              <span className="h-5 shrink-0 rounded border border-cg-border px-1.5 font-cg-mono text-cg-xs leading-[18px] text-cg-tertiary">
+                {a.commit_sha.slice(0, 8)}
+              </span>
+            )
           )}
         </div>
+        {a.kind === 'pr' && a.pr_title && <p className="mt-0.5 truncate text-cg-sm text-cg-text">{a.pr_title}</p>}
         <p className="mt-1 flex flex-wrap gap-x-1.5 text-cg-sm text-cg-secondary">
           {meta.map((item, i) => (
             <span key={i} className="inline-flex items-center gap-1.5">

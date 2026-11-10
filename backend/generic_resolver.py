@@ -88,6 +88,8 @@ class GenericLinker:
                 }
                 if s.get("class_name"):
                     n["class_name"] = s["class_name"]
+                if not is_class:
+                    n["params"] = s.get("param_count", 0)
                 if s.get("doc"):
                     n["doc"] = s["doc"]
                 b.nodes[sid] = n

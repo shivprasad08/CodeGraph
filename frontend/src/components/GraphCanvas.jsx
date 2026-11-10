@@ -63,6 +63,7 @@ function buildPalette() {
     text: read('--cg-text', '#EDEDEF'),
     secondary: read('--cg-text-secondary', '#A1A1AA'),
     severity: Object.fromEntries(Object.entries(SEVERITY).map(([k, v]) => [k, read(v, '#8B8B94')])),
+    success: read('--cg-success', '#4CB782'),
     mono: read('--cg-font-mono', 'monospace'),
     sans: read('--cg-font-sans', 'sans-serif'),
     grid: 'rgba(255, 255, 255, 0.04)',
@@ -98,6 +99,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     onExitSimulation,
     hullsVisible = true,
     onZoom,
+    prOverlay = null,
   },
   ref,
 ) {
@@ -355,6 +357,15 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     [dimensions, palette, hullsVisible, prepared, simulationMode],
   );
 
+  // PR impact: ring colour per change kind; impacted nodes tinted by depth (1 = strongest)
+  const prColors = useMemo(() => {
+    const [tr, tg, tb] = hexToRgb(palette.text);
+    return {
+      ring: { added: palette.success, modified: palette.severity.medium, removed: palette.severity.high },
+      depth: (d) => `rgba(${tr}, ${tg}, ${tb}, ${[1, 0.95, 0.72, 0.52, 0.38][Math.min(d, 4)]})`,
+    };
+  }, [palette]);
+
   const nodeCanvasObject = useCallback(
     (node, ctx, k) => {
       if (!Number.isFinite(node.x)) return;
@@ -362,7 +373,19 @@ const GraphCanvas = forwardRef(function GraphCanvas(
       const lit = isLit(node.id, dim);
       let r = node.__r;
       let fill = node.__color.solid;
-      if (simulationMode && blastRadius) {
+      const prKind = prOverlay?.changes.get(node.id);
+      if (prOverlay) {
+        const depth = prOverlay.depths.get(node.id);
+        if (prKind) {
+          ctx.globalAlpha = 1;
+          r *= 1.25;
+        } else if (depth) {
+          fill = prColors.depth(depth);
+          ctx.globalAlpha = 1;
+        } else {
+          ctx.globalAlpha = prOverlay.dimOthers ? 0.12 : node.type === 'file' ? 0.5 : 0.3;
+        }
+      } else if (simulationMode && blastRadius) {
         const hit = blastRadius.affected.get(node.id);
         fill = hit ? BLAST[hit.severity] ?? fill : palette.neutral.solid;
         ctx.globalAlpha = hit ? 1 : 0.15;
@@ -397,6 +420,14 @@ const GraphCanvas = forwardRef(function GraphCanvas(
           ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
           ctx.fill();
       }
+      if (prKind) {
+        ctx.globalAlpha = 1;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, r + 2.5, 0, 2 * Math.PI);
+        ctx.strokeStyle = prColors.ring[prKind] ?? palette.text;
+        ctx.lineWidth = 2 / k;
+        ctx.stroke();
+      }
       if (chatRef.current?.has(node.id)) {
         ctx.beginPath();
         ctx.arc(node.x, node.y, r + 3, 0, 2 * Math.PI);
@@ -420,7 +451,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
       ctx.globalAlpha = 1;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [palette, simulationMode, blastRadius],
+    [palette, simulationMode, blastRadius, prOverlay, prColors],
   );
 
   const drawLabel = (ctx, node, k) => {
@@ -521,6 +552,10 @@ const GraphCanvas = forwardRef(function GraphCanvas(
   };
   const linkColor = useCallback(
     (link) => {
+      if (prOverlay) {
+        const on = (id) => prOverlay.changes.has(id) || prOverlay.depths.has(id);
+        return on(link.source.id) && on(link.target.id) ? 'rgba(161, 161, 170, 0.5)' : 'rgba(255, 255, 255, 0.035)';
+      }
       if (simulationMode && blastRadius) {
         const s = blastRadius.affected.get(link.source.id);
         const t = blastRadius.affected.get(link.target.id);
@@ -533,7 +568,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
       return link.type === 'imports' ? link.__color.imports[step] : link.__color.calls[step];
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [simulationMode, blastRadius],
+    [simulationMode, blastRadius, prOverlay],
   );
   const linkWidth = useCallback(
     (link) => (simulationMode && blastRadius ? 1.5 : dimAmount() > 0 && linkFocused(link) ? 1 : 0.5),

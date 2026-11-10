@@ -273,14 +273,18 @@ class PgStore:
             return None
         row = await self._fetchone(
             "select j.id, j.repo_url, j.status, j.stage, j.progress, j.message, j.attempts, j.analysis_id,"
-            " a.repo, a.commit_sha, a.schema_version, a.error, a.error_code"
-            " from jobs j left join analyses a on a.id = j.analysis_id where j.id = %s",
+            " j.pr_analysis_id, coalesce(a.repo, p.repo) as repo, a.commit_sha,"
+            " coalesce(a.schema_version, p.schema_version) as schema_version,"
+            " coalesce(a.error, p.error) as error, coalesce(a.error_code, p.error_code) as error_code, p.pr_number"
+            " from jobs j left join analyses a on a.id = j.analysis_id left join pr_analyses p on p.id = j.pr_analysis_id"
+            " where j.id = %s",
             (jid,),
         )
         if row is None:
             return None
         return {
             "job_id": str(row["id"]),
+            "kind": "pr" if row["pr_analysis_id"] else "repo",
             "repo_url": row["repo_url"],
             "status": _API_STATUS.get(row["status"], row["status"]),
             "progress": row["progress"],
@@ -290,6 +294,8 @@ class PgStore:
             "error_code": row["error_code"] if row["status"] == "failed" else None,
             "attempts": row["attempts"],
             "analysis_id": row["analysis_id"],
+            "pr_analysis_id": row["pr_analysis_id"],
+            "pr_number": row["pr_number"],
             "repo": row["repo"],
             "commit_sha": row["commit_sha"],
             "schema_version": row["schema_version"],
@@ -380,6 +386,11 @@ class PgStore:
                     " updated_at = now() where id = (select analysis_id from jobs where id = %s) and status <> 'done'",
                     (error, error_code, job_id),
                 )
+                await conn.execute(
+                    "update pr_analyses set status = 'failed', error = %s, error_code = %s, finished_at = now(),"
+                    " updated_at = now() where id = (select pr_analysis_id from jobs where id = %s) and status <> 'done'",
+                    (error, error_code, job_id),
+                )
 
     # -- worker ---------------------------------------------------------------
     async def claim_job(self, worker_id: str) -> dict | None:
@@ -392,7 +403,7 @@ class PgStore:
                     " where id = (select id from jobs where status = 'queued'"
                     "   or (status = 'running' and locked_until < now())"
                     "   order by created_at for update skip locked limit 1)"
-                    " returning id, repo_url, attempts, analysis_id",
+                    " returning id, repo_url, attempts, analysis_id, pr_analysis_id",
                     {"w": worker_id, "lock": LOCK_SECONDS},
                 )
                 row = await cur.fetchone()
@@ -400,6 +411,10 @@ class PgStore:
                     await conn.execute(
                         "update analyses set status = 'running', updated_at = now() where id = %s and status = 'queued'",
                         (row["analysis_id"],),
+                    )
+                    await conn.execute(
+                        "update pr_analyses set status = 'running', updated_at = now() where id = %s and status = 'queued'",
+                        (row["pr_analysis_id"],),
                     )
         if row is None:
             return None
@@ -423,6 +438,133 @@ class PgStore:
                 " where id = %s and locked_by = %s and status = 'running'",
                 (job_id, worker_id),
             )
+
+    # -- base/head analyses built inside a PR job ------------------------------
+    async def save_analysis(self, repo: str, sha: str, graph: dict):
+        """Stores a finished graph for repo@sha (the existing row wins a race). Returns its id."""
+        from psycopg.types.json import Jsonb
+
+        health = graph.get("analysis") or {}
+        row = await self._fetchone(
+            "insert into analyses (repo, commit_sha, schema_version, status, graph_gz, stats, languages,"
+            " health_score, health_grade, finished_at) values (%s, %s, %s, 'done', %s, %s, %s, %s, %s, now())"
+            " on conflict (lower(repo), commit_sha, schema_version) where status = 'done' do nothing returning id",
+            (repo, sha, GRAPH_SCHEMA_VERSION, db.compress_graph(graph), Jsonb(graph.get("stats")),
+             Jsonb(graph.get("languages")), health.get("score"), health.get("grade")),
+        )
+        return row["id"] if row else await self.find_done_analysis(repo, sha)
+
+    # -- PR analyses -------------------------------------------------------------
+    async def create_pr_job(self, repo_url: str, ip: str, repo: str, number: int) -> str:
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                cur = await conn.execute(
+                    "insert into pr_analyses (repo, pr_number, schema_version, status) values (%s, %s, %s, 'queued') returning id",
+                    (repo, number, GRAPH_SCHEMA_VERSION),
+                )
+                pr_id = (await cur.fetchone())["id"]
+                cur = await conn.execute(
+                    "insert into jobs (pr_analysis_id, repo_url, status, stage, progress, message, client_ip_hash)"
+                    " values (%s, %s, 'queued', 'queued', 0, 'Queued', %s) returning id",
+                    (pr_id, repo_url, hash_ip(ip)),
+                )
+                return str((await cur.fetchone())["id"])
+
+    async def create_done_pr_job(self, repo_url: str, ip: str, pr_id) -> str:
+        row = await self._fetchone(
+            "insert into jobs (pr_analysis_id, repo_url, status, stage, progress, message, client_ip_hash)"
+            " values (%s, %s, 'done', 'done', 100, %s, %s) returning id",
+            (pr_id, repo_url, CACHED_MESSAGE, hash_ip(ip)),
+        )
+        return str(row["id"])
+
+    async def find_done_pr(self, repo: str, number: int, base_sha: str, head_sha: str):
+        row = await self._fetchone(
+            "select id from pr_analyses where lower(repo) = lower(%s) and pr_number = %s and base_sha = %s"
+            " and head_sha = %s and schema_version = %s and status = 'done'",
+            (repo, number, base_sha, head_sha, GRAPH_SCHEMA_VERSION),
+        )
+        return row["id"] if row else None
+
+    async def _finish_pr_on(self, conn, job_id: str, pr_id, message: str) -> None:
+        await conn.execute(
+            "update jobs set pr_analysis_id = %s, status = 'done', stage = 'done', progress = 100, message = %s,"
+            " locked_by = null, locked_until = null, updated_at = now() where id = %s",
+            (pr_id, message, job_id),
+        )
+
+    async def _drop_pr_placeholder(self, conn, placeholder, target) -> None:
+        await conn.execute("update user_analyses set pr_analysis_id = %s where pr_analysis_id = %s", (target, placeholder))
+        await conn.execute("delete from pr_analyses where id = %s and status <> 'done'", (placeholder,))
+
+    async def resolve_pr(self, job_id: str, meta: dict) -> bool:
+        """
+        The PR's commits are known: a finished result for them finishes the job (True); otherwise
+        the job's own row records the PR's details and is marked running (False).
+        """
+        base_sha, head_sha = meta["base_sha"][:8], meta["head_sha"][:8]
+        existing = await self.find_done_pr(meta["full_name"], meta["number"], base_sha, head_sha)
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                cur = await conn.execute("select pr_analysis_id from jobs where id = %s", (job_id,))
+                own = (await cur.fetchone() or {}).get("pr_analysis_id")
+                if existing is None:
+                    await conn.execute(
+                        "update pr_analyses set title = %s, author = %s, html_url = %s, base_sha = %s, head_sha = %s,"
+                        " head_repo = %s, status = 'running', updated_at = now() where id = %s and status <> 'done'",
+                        (meta["title"], meta["author"], meta["html_url"], base_sha, head_sha, meta["head_repo"], own),
+                    )
+                    return False
+                await self._finish_pr_on(conn, job_id, existing, CACHED_MESSAGE)
+                if own and own != existing:
+                    await self._drop_pr_placeholder(conn, own, existing)
+                return True
+
+    async def complete_pr_job(self, job_id: str, meta: dict, base_id, head_id, result: dict) -> None:
+        from psycopg import errors
+
+        blob = db.compress_graph(result)
+        base_sha, head_sha = meta["base_sha"][:8], meta["head_sha"][:8]
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                cur = await conn.execute("select pr_analysis_id from jobs where id = %s", (job_id,))
+                own = (await cur.fetchone() or {}).get("pr_analysis_id")
+                target = own
+                try:
+                    async with conn.transaction():
+                        await conn.execute(
+                            "update pr_analyses set repo = %s, pr_number = %s, title = %s, author = %s, html_url = %s,"
+                            " base_sha = %s, head_sha = %s, head_repo = %s, base_analysis_id = %s, head_analysis_id = %s,"
+                            " schema_version = %s, status = 'done', result_gz = %s, risk_score = %s, risk_level = %s,"
+                            " partial = %s, error = null, error_code = null, finished_at = now(), updated_at = now()"
+                            " where id = %s",
+                            (meta["full_name"], meta["number"], meta["title"], meta["author"], meta["html_url"],
+                             base_sha, head_sha, meta["head_repo"], base_id, head_id, GRAPH_SCHEMA_VERSION, blob,
+                             result["risk"]["score"], result["risk"]["level"], bool(result.get("partial")), own),
+                        )
+                except errors.UniqueViolation:
+                    target = await self.find_done_pr(meta["full_name"], meta["number"], base_sha, head_sha)
+                await self._finish_pr_on(conn, job_id, target, "Analysis complete")
+                if own and target != own:
+                    await self._drop_pr_placeholder(conn, own, target)
+        logger.info(f"[store] saved PR {meta['full_name']}#{meta['number']}: {len(blob) / 1024:.1f} KB compressed")
+
+    async def pr_row(self, pr_id) -> dict | None:
+        if pr_id is None:
+            return None
+        return await self._fetchone(
+            "select p.id, p.repo, p.pr_number, p.status, p.base_sha, p.head_sha, p.head_repo, p.base_analysis_id,"
+            " p.head_analysis_id, p.schema_version, ab.repo as base_repo, ah.repo as head_repo_name"
+            " from pr_analyses p left join analyses ab on ab.id = p.base_analysis_id"
+            " left join analyses ah on ah.id = p.head_analysis_id where p.id = %s",
+            (pr_id,),
+        )
+
+    async def pr_result(self, pr_id) -> dict | None:
+        if pr_id is None:
+            return None
+        row = await self._fetchone("select result_gz from pr_analyses where id = %s and status = 'done'", (pr_id,))
+        return db.decompress_graph(row["result_gz"]) if row and row["result_gz"] is not None else None
 
     # -- reads ----------------------------------------------------------------
     async def load_graph(self, repo: str, sha: str) -> dict | None:
@@ -466,6 +608,10 @@ class PgStore:
                 (GRAPH_SCHEMA_VERSION,),
             )
             old_schema = cur.rowcount
+            cur = await conn.execute(
+                "delete from pr_analyses where status <> 'done' and created_at < now() - interval '7 days'"
+            )
+            unfinished += cur.rowcount
             cur = await conn.execute("delete from sessions where expires_at < now()")
             sessions = cur.rowcount
             cur = await conn.execute("delete from rate_events where at < now() - interval '1 day'")

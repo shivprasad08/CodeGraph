@@ -47,8 +47,9 @@ UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 PRIVATE = {"error": "This analysis is private.", "error_code": "private_analysis", "detail": None}
 
 # Set by main at startup: runtime.auth is the AuthStore (None without Postgres: no access control);
-# runtime.load_graph(analysis_id, repo, sha, schema_version) reads a stored graph
-runtime = SimpleNamespace(auth=None, load_graph=None)
+# runtime.load_graph(analysis_id, repo, sha, schema_version) reads a stored graph;
+# runtime.load_pr(pr_analysis_id) reads a stored PR result
+runtime = SimpleNamespace(auth=None, load_graph=None, load_pr=None)
 
 router = APIRouter()
 
@@ -158,10 +159,20 @@ async def can_view_analysis(request: Request, analysis_id) -> bool:
     return await runtime.auth.owns_analysis(await current_session(request), analysis_id)
 
 
+async def can_view_pr(request: Request, pr_analysis_id) -> bool:
+    """Owner of the PR analysis, or a share token for it. Always true without Postgres."""
+    if runtime.auth is None:
+        return True
+    share = await current_share(request)
+    if share and pr_analysis_id is not None and str(share.get("pr_analysis_id")) == str(pr_analysis_id):
+        return True
+    return await runtime.auth.owns_pr_analysis(await current_session(request), pr_analysis_id)
+
+
 async def commit_analysis(request: Request, repo: str, sha: str) -> dict | None:
     """The analysis of repo@sha this caller may read (via share token or ownership), or None."""
     share = await current_share(request)
-    if share and share["repo"].lower() == repo.lower() and share["commit_sha"] == sha:
+    if share and share.get("analysis_id") and share["repo"].lower() == repo.lower() and share["commit_sha"] == sha:
         return {"id": share["analysis_id"], "repo": share["repo"], "commit_sha": sha,
                 "schema_version": share["schema_version"]}
     return await runtime.auth.owned_commit_analysis(await current_session(request), repo, sha)

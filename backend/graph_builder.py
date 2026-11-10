@@ -22,7 +22,9 @@ from generic_resolver import GenericLinker
 # 7: non-empty __init__.py files are parsed; analysis drops the pattern bonus. Also retires any
 # graph cached before private repos were rejected (/source only serves files of cached graphs).
 # 8: files that define nothing no longer make architecture modules (package files join their folder).
-GRAPH_SCHEMA_VERSION = 8
+# 9: function nodes carry "params" (parameter count, for PR signature-change detection).
+# 10: test files are recognised by real conventions only (src/flask/testing.py is now analysed).
+GRAPH_SCHEMA_VERSION = 10
 
 # Method names too common to infer from an unknown receiver (dict.get, list.append, file.close…)
 GENERIC_METHOD_STOPLIST = frozenset({
@@ -180,6 +182,8 @@ class _Builder:
                     "qualified_name": fn.get("qualified_name", fn["name"]),
                     "summary": "", "lines": [fn["start_line"], fn["end_line"]],
                     "centrality": 0.0, "is_entry_point": False,
+                    # Parameters without self/cls: PR impact compares them to spot signature changes
+                    "params": len(fn.get("parameters", [])),
                 }
                 if fn.get("class_name"):
                     node["class_name"] = fn["class_name"]

@@ -97,21 +97,32 @@ class AuthStore:
         return moved
 
     # -- ownership --------------------------------------------------------------
-    async def add_user_analysis(self, session: dict, analysis_id, job_id) -> str:
-        """Owner's row for this analysis: the existing one (moved to the top) or a new one."""
+    async def add_user_analysis(self, session: dict, analysis_id, job_id, pr_analysis_id=None) -> str:
+        """Owner's row for this analysis (or PR analysis): the existing one, moved to the top, or a new one."""
         column, owner = _owner(session)
+        target_col, target = ("pr_analysis_id", pr_analysis_id) if pr_analysis_id else ("analysis_id", analysis_id)
         row = await self._one(
             f"update user_analyses set job_id = %s, created_at = now() where id = ("
-            f" select id from user_analyses where {column} = %s and analysis_id = %s and deleted_at is null"
+            f" select id from user_analyses where {column} = %s and {target_col} = %s and deleted_at is null"
             f" order by created_at desc limit 1) returning id",
-            (job_id, owner, analysis_id),
+            (job_id, owner, target),
         )
         if row is None:
             row = await self._one(
-                f"insert into user_analyses ({column}, analysis_id, job_id) values (%s, %s, %s) returning id",
-                (owner, analysis_id, job_id),
+                f"insert into user_analyses ({column}, {target_col}, job_id, kind) values (%s, %s, %s, %s) returning id",
+                (owner, target, job_id, "pr" if pr_analysis_id else "repo"),
             )
         return str(row["id"])
+
+    async def owns_pr_analysis(self, session: dict | None, pr_analysis_id) -> bool:
+        if not session or pr_analysis_id is None:
+            return False
+        column, owner = _owner(session)
+        row = await self._one(
+            f"select 1 from user_analyses where {column} = %s and pr_analysis_id = %s and deleted_at is null limit 1",
+            (owner, pr_analysis_id),
+        )
+        return row is not None
 
     async def owns_analysis(self, session: dict | None, analysis_id) -> bool:
         if not session or analysis_id is None:
@@ -142,14 +153,20 @@ class AuthStore:
         column, owner = _owner(session)
         return await self._all(
             f"select * from ("
-            f" select distinct on (ua.analysis_id) ua.id, ua.job_id, ua.analysis_id, ua.created_at,"
-            f"  a.repo, a.commit_sha, a.status, a.languages, a.health_score, a.health_grade, a.error_code,"
+            f" select distinct on (coalesce(ua.analysis_id, ua.pr_analysis_id)) ua.id, ua.job_id, ua.analysis_id,"
+            f"  ua.pr_analysis_id, ua.kind, ua.created_at,"
+            f"  coalesce(a.repo, p.repo) as repo, coalesce(a.commit_sha, p.head_sha) as commit_sha,"
+            f"  coalesce(a.status, p.status) as status, a.languages, a.health_score, a.health_grade,"
+            f"  coalesce(a.error_code, p.error_code) as error_code,"
+            f"  p.pr_number, p.title as pr_title, p.risk_score, p.risk_level, p.base_sha,"
             f"  (select count(*) from share_links sl join user_analyses u2 on u2.id = sl.user_analysis_id"
-            f"   where u2.analysis_id = ua.analysis_id and u2.{column} = %(o)s and u2.deleted_at is null"
+            f"   where coalesce(u2.analysis_id, u2.pr_analysis_id) = coalesce(ua.analysis_id, ua.pr_analysis_id)"
+            f"   and u2.{column} = %(o)s and u2.deleted_at is null"
             f"   and sl.revoked_at is null and (sl.expires_at is null or sl.expires_at > now())) as shares"
-            f" from user_analyses ua join analyses a on a.id = ua.analysis_id"
+            f" from user_analyses ua left join analyses a on a.id = ua.analysis_id"
+            f" left join pr_analyses p on p.id = ua.pr_analysis_id"
             f" where ua.{column} = %(o)s and ua.deleted_at is null"
-            f" order by ua.analysis_id, ua.created_at desc"
+            f" order by coalesce(ua.analysis_id, ua.pr_analysis_id), ua.created_at desc"
             f") t order by created_at desc limit %(limit)s",
             {"o": owner, "limit": limit},
         )
@@ -158,21 +175,23 @@ class AuthStore:
         """Removes the analysis from the owner's list (every row for it); its share links stop working."""
         column, owner = _owner(session)
         row = await self._one(
-            f"select analysis_id from user_analyses where id = %s and {column} = %s and deleted_at is null",
+            f"select analysis_id, pr_analysis_id from user_analyses where id = %s and {column} = %s and deleted_at is null",
             (user_analysis_id, owner),
         )
         if row is None:
             return False
+        target_col = "pr_analysis_id" if row["pr_analysis_id"] else "analysis_id"
         await self._one(
-            f"update user_analyses set deleted_at = now() where {column} = %s and analysis_id = %s and deleted_at is null",
-            (owner, row["analysis_id"]),
+            f"update user_analyses set deleted_at = now() where {column} = %s and {target_col} = %s and deleted_at is null",
+            (owner, row[target_col]),
         )
         return True
 
     async def user_analysis_for_owner(self, user_id, user_analysis_id) -> dict | None:
         return await self._one(
-            "select ua.id, ua.analysis_id from user_analyses ua join analyses a on a.id = ua.analysis_id"
-            " where ua.id = %s and ua.user_id = %s and ua.deleted_at is null and a.status = 'done'",
+            "select ua.id, ua.analysis_id, ua.pr_analysis_id from user_analyses ua"
+            " left join analyses a on a.id = ua.analysis_id left join pr_analyses p on p.id = ua.pr_analysis_id"
+            " where ua.id = %s and ua.user_id = %s and ua.deleted_at is null and coalesce(a.status, p.status) = 'done'",
             (user_analysis_id, user_id),
         )
 
@@ -192,11 +211,15 @@ class AuthStore:
         if not token or len(token) > 200:
             return None
         return await self._one(
-            "select sl.id, sl.expires_at, ua.analysis_id, a.repo, a.commit_sha, a.schema_version,"
+            "select sl.id, sl.expires_at, ua.analysis_id, ua.pr_analysis_id, ua.job_id, ua.kind,"
+            " coalesce(a.repo, p.repo) as repo, coalesce(a.commit_sha, p.head_sha) as commit_sha,"
+            " coalesce(a.schema_version, p.schema_version) as schema_version, p.pr_number,"
             " u.login as shared_by_login, u.avatar_url as shared_by_avatar"
             " from share_links sl join user_analyses ua on ua.id = sl.user_analysis_id"
-            " join analyses a on a.id = ua.analysis_id join users u on u.id = sl.created_by"
-            " where sl.token_hash = %s and sl.revoked_at is null and ua.deleted_at is null and a.status = 'done'"
+            " left join analyses a on a.id = ua.analysis_id left join pr_analyses p on p.id = ua.pr_analysis_id"
+            " join users u on u.id = sl.created_by"
+            " where sl.token_hash = %s and sl.revoked_at is null and ua.deleted_at is null"
+            " and coalesce(a.status, p.status) = 'done'"
             " and (sl.expires_at is null or sl.expires_at > now())",
             (token_hash(token),),
         )
@@ -218,12 +241,13 @@ class AuthStore:
         """The user's links (newest first); for one analysis when user_analysis_id is given."""
         return await self._all(
             "select sl.id, sl.user_analysis_id, sl.created_at, sl.expires_at, sl.revoked_at, sl.view_count,"
-            " sl.last_viewed_at, a.repo, a.commit_sha,"
+            " sl.last_viewed_at, coalesce(a.repo, p.repo) as repo, coalesce(a.commit_sha, p.head_sha) as commit_sha,"
             " (sl.revoked_at is null and (sl.expires_at is null or sl.expires_at > now())) as active"
             " from share_links sl join user_analyses ua on ua.id = sl.user_analysis_id"
-            " join analyses a on a.id = ua.analysis_id"
+            " left join analyses a on a.id = ua.analysis_id left join pr_analyses p on p.id = ua.pr_analysis_id"
             " where sl.created_by = %(u)s and ua.deleted_at is null"
-            " and (%(ua)s::uuid is null or ua.analysis_id = (select analysis_id from user_analyses where id = %(ua)s::uuid))"
+            " and (%(ua)s::uuid is null or coalesce(ua.analysis_id, ua.pr_analysis_id) = ("
+            "  select coalesce(analysis_id, pr_analysis_id) from user_analyses where id = %(ua)s::uuid))"
             " order by sl.created_at desc limit 200",
             {"u": user_id, "ua": user_analysis_id},
         )

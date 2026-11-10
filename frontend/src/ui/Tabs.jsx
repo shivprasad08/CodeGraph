@@ -53,7 +53,9 @@ export const TabsContent = forwardRef(function TabsContent({ className, ...props
   return (
     <TabsPrimitive.Content
       ref={ref}
-      className={cn('pt-4 rounded-cg-control', focusRing, className)}
+      // Inactive panels keep an empty element with the hidden attribute; a display class such as
+      // "flex" would override it, so hide them explicitly
+      className={cn('pt-4 rounded-cg-control', focusRing, className, 'data-[state=inactive]:hidden')}
       {...props}
     />
   );

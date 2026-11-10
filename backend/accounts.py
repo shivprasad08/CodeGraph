@@ -63,6 +63,12 @@ async def my_analyses(request: Request):
             "languages": r["languages"] or [],
             "health_score": r["health_score"],
             "health_grade": r["health_grade"],
+            "kind": r["kind"],
+            "pr_number": r["pr_number"],
+            "pr_title": r["pr_title"],
+            "risk_score": r["risk_score"],
+            "risk_level": r["risk_level"],
+            "base_sha": r["base_sha"],
             "created_at": _iso(r["created_at"]),
             "shares": r["shares"],
         } for r in rows],
@@ -107,11 +113,28 @@ async def open_share(token: str):
     if runtime.auth is None:
         return _unavailable()
     share = await runtime.auth.get_share(token)
+    if share and share["pr_analysis_id"]:
+        result = await runtime.load_pr(share["pr_analysis_id"]) if runtime.load_pr else None
+        if not result:
+            return JSONResponse(status_code=404, content=SHARE_GONE, headers=_no_store())
+        await runtime.auth.record_share_view(share["id"])
+        return JSONResponse({
+            "kind": "pr",
+            "share": {
+                "repo": share["repo"],
+                "pr_number": share["pr_number"],
+                "expires_at": _iso(share["expires_at"]),
+                "shared_by": {"login": share["shared_by_login"], "avatar_url": share["shared_by_avatar"]},
+            },
+            "job_id": str(share["job_id"]) if share["job_id"] else None,
+            "result": result,
+        }, headers=_no_store())
     graph = await runtime.load_graph(share["analysis_id"], share["repo"], share["commit_sha"], share["schema_version"]) if share else None
     if not share or not graph:
         return JSONResponse(status_code=404, content=SHARE_GONE, headers=_no_store())
     await runtime.auth.record_share_view(share["id"])
     return JSONResponse({
+        "kind": "repo",
         "share": {
             "repo": share["repo"],
             "commit_sha": share["commit_sha"],

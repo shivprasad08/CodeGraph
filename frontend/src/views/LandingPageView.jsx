@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { IconButton } from '../ui';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { normalizeRepoInput } from '../lib/repoInput';
+import { normalizeRepoInput, parsePrInput } from '../lib/repoInput';
 import { analyzeRepo } from '../api';
 import { signIn, useSession } from '../lib/session';
 import Hero from '../components/Hero';
@@ -37,7 +37,8 @@ export default function LandingPageView() {
   const { status } = useSession();
   // A shared /graph/owner/repo link lands here with the repo prefilled (?repo=owner/repo)
   const [searchParams] = useSearchParams();
-  const prefilledRepo = normalizeRepoInput(searchParams.get('repo') ?? '') || '';
+  const prefillParam = searchParams.get('repo') ?? '';
+  const prefilledRepo = parsePrInput(prefillParam)?.path || normalizeRepoInput(prefillParam) || '';
   const [signinNotice, setSigninNotice] = useState(() => SIGNIN_NOTICES[searchParams.get('signin')] ?? '');
   useEffect(() => {
     if (prefilledRepo) inputRef.current?.focus();
@@ -47,10 +48,15 @@ export default function LandingPageView() {
     document.title = 'CodeGraph — Map any codebase';
   }, []);
 
-  // Same flow as before: start the job, then open its graph page. Errors propagate to Hero.
-  const handleAnalyze = async (repoPath) => {
-    const [owner, repo] = repoPath.split('/');
-    const result = await analyzeRepo(`https://github.com/${repoPath}`);
+  // Start the job, then open its page (graph, or PR impact). Errors propagate to Hero.
+  const handleAnalyze = async (path) => {
+    const pr = parsePrInput(path);
+    const result = await analyzeRepo(`https://github.com/${path}`);
+    if (pr) {
+      navigate(`/pr/${pr.owner}/${pr.repo}/${pr.number}/jobs/${result.job_id}`);
+      return;
+    }
+    const [owner, repo] = path.split('/');
     navigate(`/graph/${owner}/${repo}/jobs/${result.job_id}`);
   };
 

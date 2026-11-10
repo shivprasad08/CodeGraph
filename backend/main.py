@@ -9,6 +9,7 @@
 
 import hmac
 import os
+import time
 import asyncio
 import json
 import logging
@@ -37,6 +38,8 @@ import db
 import auth
 import accounts
 import auth_store
+import github_pr
+import pr_impact
 import store as store_mod
 import worker as worker_mod
 from graph_builder import GRAPH_SCHEMA_VERSION
@@ -173,6 +176,7 @@ async def lifespan(app: FastAPI):
     if store.kind == "postgres":
         auth.runtime.auth = auth_store.AuthStore(store.pool)
         auth.runtime.load_graph = _graph_by_analysis
+        auth.runtime.load_pr = store.pr_result
         if not (config.GITHUB_OAUTH_CLIENT_ID and config.GITHUB_OAUTH_CLIENT_SECRET and config.SESSION_SECRET):
             logger.warning("[auth] GitHub sign-in is not configured: analyses stay anonymous (per browser session)")
     else:
@@ -232,11 +236,18 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ---------------------------------------------------------------------------
 # Graph reads: L1 (/tmp) first, then the store (authoritative)
 # ---------------------------------------------------------------------------
+L1_STATS = {"writes": 0, "write_errors": 0, "last_error": None}
+
+
 def _write_l1(repo: str, sha: str, graph: dict) -> None:
+    """Refills the /tmp cache after a database read or a finished analysis (best effort)."""
     try:
         cache.write_cache(repo, sha, graph)
+        L1_STATS["writes"] += 1
     except Exception as e:  # the L1 cache is optional
-        logger.warning(f"[cache] L1 write failed for {repo}@{sha}: {type(e).__name__}")
+        L1_STATS["write_errors"] += 1
+        L1_STATS["last_error"] = f"{type(e).__name__}: {str(e)[:200]}"
+        logger.warning(f"[cache] L1 write failed for {repo}@{sha}: {type(e).__name__}: {e}")
 
 
 async def _load_graph(repo: str, sha: str) -> dict | None:
@@ -264,6 +275,15 @@ async def _job_graph(job: dict) -> dict | None:
     return graph
 
 
+async def _latest_pr(owner: str, repo: str, number: int) -> dict | None:
+    """The PR's current metadata (base/head commits), or None when GitHub cannot tell us quickly."""
+    try:
+        return await asyncio.wait_for(github_pr.fetch_pr_meta(owner, repo, number), timeout=10)
+    except Exception as e:
+        logger.info(f"[analyze] PR lookup failed for {owner}/{repo}#{number}: {type(e).__name__}")
+        return None
+
+
 async def _latest_commit(repo_url: str) -> tuple[str, str] | None:
     """(owner/repo, sha) of the default branch, or None when GitHub cannot tell us quickly."""
     try:
@@ -286,7 +306,10 @@ class PipelineFailure(Exception):
 
 
 async def _run_pipeline(job_id: str, repo_url: str) -> None:
-    """Runs the full analysis for one job and records the outcome in the store."""
+    """Runs one job (a repository, or a pull request) and records the outcome in the store."""
+    if github_pr.parse_pr_url(repo_url):
+        await _run_pr_pipeline(job_id, repo_url)
+        return
     handle = store.job_handle(job_id)
     try:
         outcome = await _pipeline(job_id, handle, repo_url)
@@ -336,17 +359,32 @@ async def _pipeline(job_id: str, handle, repo_url: str) -> tuple[str, str, dict]
 
     repo = ingestion_result["repo"]
     sha = ingestion_result["commit_sha"]
-    # Raw file contents keyed by path, for the analyzer
-    source_files = {f["path"]: f["content"] for f in ingestion_result["files"]}
 
     # 2. Already analysed (this commit, this graph schema)?
     if await store.resolve_commit(job_id, repo, sha):
         logger.info(f"Cache hit for {repo} @ {sha}")
         return None
 
+    # 3–6. Parse, build, group, summarise, check
+    def progress(step: str, fraction: float, message: str) -> None:
+        handle.set(stage=step, progress=30 + int(65 * fraction), message=message)
+
+    graph = await _build_graph(ingestion_result, progress)
+    handle.set(stage="saving", progress=95, message="Saving analysis...")
+    return repo, sha, graph
+
+
+async def _build_graph(ingestion_result: dict, progress) -> dict:
+    """
+    Parse → graph → architecture → AI summaries → static analysis for one commit's files.
+    progress(step, fraction 0–1, message). Raises PipelineFailure when parsing or building fails.
+    """
+    repo, sha = ingestion_result["repo"], ingestion_result["commit_sha"]
+    source_files = {f["path"]: f["content"] for f in ingestion_result["files"]}
+
     # 3. Parsing
     logger.info(f"Starting parser for {repo} @ {sha}")
-    handle.set(stage="parsing", progress=30, message="Parsing code structure...")
+    progress("parsing", 0.0, "Parsing code structure...")
     try:
         parse_output = parser.parse_repo(ingestion_result)
     except Exception as e:
@@ -355,7 +393,7 @@ async def _pipeline(job_id: str, handle, repo_url: str) -> tuple[str, str, dict]
 
     # 4. Graph building
     logger.info(f"Starting graph builder for {repo}")
-    handle.set(stage="graph", progress=55, message="Building knowledge graph...")
+    progress("graph", 0.38, "Building knowledge graph...")
     try:
         graph = graph_builder.build_graph(parse_output)
     except Exception as e:
@@ -370,10 +408,10 @@ async def _pipeline(job_id: str, handle, repo_url: str) -> tuple[str, str, dict]
 
     # 5. Enrichment
     logger.info(f"Starting enrichment for {repo}")
-    handle.set(stage="enrichment", progress=70, message="Generating explanations...")
+    progress("enrichment", 0.62, "Generating explanations...")
     try:
         def _on_enrich_progress(done: int, total: int) -> None:
-            handle.set(progress=70 + int(20 * done / max(total, 1)), message=f"Summarizing files {done}/{total}...")
+            progress("enrichment", 0.62 + 0.3 * done / max(total, 1), f"Summarizing files {done}/{total}...")
 
         graph = await enrichment.enrich_graph(graph, on_progress=_on_enrich_progress)
     except Exception as e:
@@ -393,9 +431,102 @@ async def _pipeline(job_id: str, handle, repo_url: str) -> tuple[str, str, dict]
         logger.info(f"[analyzer] Score: {analysis['score']}{analysis['grade']}")
     except Exception as e:
         logger.warning(f"[analyzer] Analysis failed (non-fatal): {e}")
+    return graph
 
-    handle.set(stage="saving", progress=95, message="Saving analysis...")
-    return repo, sha, graph
+
+# ---------------------------------------------------------------------------
+# Pull request pipeline (run by the worker): PR → base and head graphs → impact
+# ---------------------------------------------------------------------------
+PR_NOT_FOUND = "Pull request not found. Check the link: CodeGraph reads public repositories only."
+
+
+async def _run_pr_pipeline(job_id: str, pr_url: str) -> None:
+    handle = store.job_handle(job_id)
+    try:
+        outcome = await _pr_pipeline(job_id, handle, pr_url)
+    except PipelineFailure as f:
+        await handle.close()
+        await store.fail_job(job_id, f.message, f.error_code)
+        return
+    except asyncio.CancelledError:
+        await handle.close()
+        raise
+    except Exception as e:
+        logger.error(f"PR pipeline failed critically: {e}", exc_info=True)
+        await handle.close()
+        await store.fail_job(job_id, f"Pull request analysis failed: {str(e)}")
+        return
+    await handle.close()
+    if outcome is None:  # this PR at these commits was analysed before
+        return
+    meta, base_id, head_id, result = outcome
+    await store.complete_pr_job(job_id, meta, base_id, head_id, result)
+    logger.info(f"PR analysis complete for {meta['full_name']}#{meta['number']}")
+
+
+async def _ensure_analysis(owner: str, repo: str, sha: str, handle, stage: str, lo: int, hi: int, label: str):
+    """(analysis id, graph, reused) for owner/repo@sha: a stored analysis, or one built now."""
+    full, sha8 = f"{owner}/{repo}", sha[:8]
+    handle.set(stage=stage, progress=lo, message=f"{label}…")
+    existing = await store.find_done_analysis(full, sha8)
+    if existing is not None:
+        graph = cache.read_cache(full, sha8) or await store.analysis_graph(existing)
+        if graph:
+            _write_l1(full, sha8, graph)
+            return existing, graph, True
+    try:
+        ingested = await ingestion.fetch_repo_at(owner, repo, sha)
+    except FileLimitError as e:
+        raise PipelineFailure(f"The {stage} commit ({sha8}) is too large to analyse: {e}", "pr_too_large")
+    except NoSourceError as e:
+        raise PipelineFailure(f"The {stage} commit ({sha8}) has no source files CodeGraph can read. {e}", NoSourceError.error_code)
+    except Exception as e:
+        logger.error(f"Fetching {full}@{sha8} failed: {e}", exc_info=True)
+        raise PipelineFailure(f"Couldn't fetch the {stage} commit from GitHub: {e}")
+
+    def progress(step: str, fraction: float, message: str) -> None:
+        handle.set(stage=stage, progress=lo + int((hi - lo) * fraction), message=f"{label}: {message[0].lower()}{message[1:]}")
+
+    graph = await _build_graph(ingested, progress)
+    analysis_id = await store.save_analysis(full, sha8, graph)
+    _write_l1(full, sha8, graph)
+    return analysis_id, graph, False
+
+
+async def _pr_pipeline(job_id: str, handle, url: str):
+    """(meta, base analysis id, head analysis id, result), or None when a stored result was reused."""
+    owner, repo, number = github_pr.parse_pr_url(url)
+    started = time.monotonic()
+    handle.set(status="running", stage="fetch_pr", progress=5, message="Fetching PR")
+    try:
+        pr = await github_pr.fetch_pr(owner, repo, number)
+    except RepoPrivateError:
+        raise PipelineFailure(RepoPrivateError.message, RepoPrivateError.error_code)
+    except (RepoNotFoundError, github_pr.PRNotFoundError):
+        raise PipelineFailure(PR_NOT_FOUND, "pr_not_found")
+    except Exception as e:
+        logger.error(f"Fetching PR {owner}/{repo}#{number} failed: {e}", exc_info=True)
+        raise PipelineFailure(f"Couldn't read the pull request from GitHub: {e}")
+    meta = pr["meta"]
+    if await store.resolve_pr(job_id, meta):
+        logger.info(f"PR {owner}/{repo}#{number} already analysed at these commits")
+        return None
+
+    head_owner, head_repo = meta["head_repo"].split("/", 1)
+    base_id, base_graph, base_reused = await _ensure_analysis(owner, repo, meta["base_sha"], handle, "base", 10, 45, "Analyzing base")
+    head_id, head_graph, head_reused = await _ensure_analysis(head_owner, head_repo, meta["head_sha"], handle, "head", 45, 80, "Analyzing head")
+
+    handle.set(stage="mapping", progress=82, message="Mapping changes")
+    result = pr_impact.analyse(meta, pr["files"], base_graph, head_graph, pr["truncated"])
+    handle.set(stage="scoring", progress=88, message="Scoring")
+    handle.set(stage="summary", progress=92, message="Summarizing")
+    result = await pr_impact.summarise(result)
+    result["timing"] = {
+        "seconds": round(time.monotonic() - started, 1),
+        "base_reused": base_reused,
+        "head_reused": head_reused,
+    }
+    return meta, base_id, head_id, result
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +547,12 @@ async def analyze(request: Request, body: AnalyzeRequest):
         raise HTTPException(status_code=422, detail="repo_url cannot be empty")
 
     ip = _client_ip(request)
+    pr_ref = github_pr.parse_pr_url(body.repo_url)
+    if pr_ref and store.kind != "postgres":
+        return JSONResponse(status_code=503, content={
+            "error": "Pull request analysis isn't available on this server (it needs the database).",
+            "error_code": "pr_unavailable", "detail": None,
+        })
     session = await auth.ensure_session(request)  # anonymous session on a first visit
 
     # Rate limiting: analyses started per hour (signed in: per user; anonymous: per session and IP)
@@ -460,6 +597,9 @@ async def analyze(request: Request, body: AnalyzeRequest):
             }
         ))
 
+    if pr_ref:
+        return await _analyze_pr(request, session, ip, *pr_ref)
+
     # Latest commit already analysed with this graph schema: a job that is done straight away
     status = "queued"
     job_id = None
@@ -481,15 +621,45 @@ async def analyze(request: Request, body: AnalyzeRequest):
         job = await store.get_job(job_id)
         user_analysis_id = await auth.runtime.auth.add_user_analysis(session, job["analysis_id"], job_id)
     return auth.attach_new_session(request, JSONResponse(
-        {"job_id": job_id, "status": status, "user_analysis_id": user_analysis_id}
+        {"job_id": job_id, "status": status, "kind": "repo", "user_analysis_id": user_analysis_id}
     ))
+
+
+async def _analyze_pr(request: Request, session, ip: str, owner: str, repo: str, number: int):
+    """A PR job: done at once when this PR at its current commits was analysed before."""
+    url = github_pr.pr_url(owner, repo, number)
+    status, job_id = "queued", None
+    meta = await _latest_pr(owner, repo, number)
+    if meta:
+        existing = await store.find_done_pr(meta["full_name"], number, meta["base_sha"][:8], meta["head_sha"][:8])
+        if existing is not None:
+            job_id = await store.create_done_pr_job(url, ip, existing)
+            status = "done"
+    if job_id is None:
+        job_id = await store.create_pr_job(url, ip, f"{owner}/{repo}", number)
+        if worker:
+            worker.wake()
+    user_analysis_id = None
+    if auth.access_control_enabled():
+        job = await store.get_job(job_id)
+        user_analysis_id = await auth.runtime.auth.add_user_analysis(session, None, job_id, pr_analysis_id=job["pr_analysis_id"])
+    return auth.attach_new_session(request, JSONResponse({
+        "job_id": job_id, "status": status, "kind": "pr", "user_analysis_id": user_analysis_id,
+        "pr": {"owner": owner, "repo": repo, "number": number},
+    }))
 
 
 async def _viewable_job(request: Request, job_id: str):
     """(job, None) when the caller may see this job, else (None, error response)."""
     job = await store.get_job(job_id)
     if auth.access_control_enabled():
-        if not job or not await auth.can_view_analysis(request, job.get("analysis_id")):
+        if not job:
+            return None, auth.private_response()
+        if job.get("kind") == "pr":
+            allowed = await auth.can_view_pr(request, job.get("pr_analysis_id"))
+        else:
+            allowed = await auth.can_view_analysis(request, job.get("analysis_id"))
+        if not allowed:
             return None, auth.private_response()
     elif not job:
         return None, JSONResponse(status_code=404, content={"error": "Job not found", "detail": None})
@@ -605,6 +775,41 @@ async def get_analysis(job_id: str, request: Request):
         status_code=200,
         content=analysis
     )
+
+
+@app.get("/pr/{job_id}")
+async def get_pr_result(job_id: str, request: Request):
+    """A PR analysis result (owner, or a share token for it)."""
+    job, denied = await _viewable_job(request, job_id)
+    if denied:
+        return denied
+    if job.get("kind") != "pr":
+        return JSONResponse(status_code=404, content={"error": "Not a pull request analysis", "detail": None})
+    if job.get("status") != "done":
+        return JSONResponse(status_code=202, content={"status": job.get("status"), "message": "Analysis still in progress"})
+    result = await store.pr_result(job.get("pr_analysis_id"))
+    if not result:
+        return JSONResponse(status_code=500, content={"error": "PR result missing, run the analysis again", "detail": None})
+    return JSONResponse({**result, "job_id": job_id}, headers={"Cache-Control": "private, no-store"})
+
+
+@app.get("/pr/{job_id}/graph/{side}")
+async def get_pr_graph(job_id: str, side: str, request: Request):
+    """The full base or head graph of a PR analysis ("show full graph")."""
+    if side not in ("base", "head"):
+        return JSONResponse(status_code=404, content={"error": "Not found", "detail": None})
+    job, denied = await _viewable_job(request, job_id)
+    if denied:
+        return denied
+    if job.get("kind") != "pr" or job.get("status") != "done":
+        return JSONResponse(status_code=404, content={"error": "Not found", "detail": None})
+    row = await store.pr_row(job.get("pr_analysis_id"))
+    analysis_id = row and row[f"{side}_analysis_id"]
+    repo = row and (row["base_repo"] if side == "base" else row["head_repo_name"])
+    graph = analysis_id and await _graph_by_analysis(analysis_id, repo, row[f"{side}_sha"], row["schema_version"])
+    if not graph:
+        return JSONResponse(status_code=404, content={"error": "This graph is no longer stored", "detail": None})
+    return JSONResponse(graph, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/source/{owner}/{repo}/{commit_sha}/{file_path:path}")
@@ -785,5 +990,6 @@ async def health():
         "db": db_status,
         "queue_depth": queue["queued"],
         "active_jobs": queue["queued"] + queue["running"],
-        "cache": cache.cache_stats(),
+        "cache": {**cache.cache_stats(), "l1_writes": L1_STATS["writes"], "l1_write_errors": L1_STATS["write_errors"],
+                  "l1_last_error": L1_STATS["last_error"]},
     }

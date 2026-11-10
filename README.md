@@ -67,6 +67,17 @@ driver needs, then runs `uvicorn main:app` with reload on port 8000):
 python scripts/run_local.py            # --port 9000 to change the port
 ```
 
+Job progress is streamed (server-sent events) through the frontend's `/api` proxy: the Vercel
+rewrite in production, the Vite proxy locally. To check that events arrive one by one rather
+than in a single burst at the end, start a fresh analysis and time the events:
+```bash
+python scripts/check_streaming.py http://localhost:5173/api --url https://github.com/pallets/flask/pull/6176
+python scripts/check_streaming.py https://code-graph-ashy.vercel.app/api --url <a repo or PR not analysed yet>
+```
+Result through the Vite proxy (Nov 2026): 101 events over 112 s, first after 3.6 s, largest gap
+1.3 s: incremental. Vercel allows 120 s until the first byte of a proxied response, then any
+length as long as data keeps arriving at least every 120 s; progress is sent every second.
+
 ### 3. Frontend Setup
 
 ```bash

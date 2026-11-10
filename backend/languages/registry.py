@@ -99,16 +99,31 @@ def is_ignored(path: str) -> bool:
     return parts[-1].lower().endswith(IGNORED_SUFFIXES)
 
 
+TEST_SCRIPT_EXTS = ("js", "jsx", "ts", "tsx")
+# Case-sensitive: FooTest.java is a test class, Latest.kt is not
+TEST_CLASS_SUFFIXES = tuple(f"{s}.{ext}" for ext in ("java", "kt", "cs") for s in ("Test", "Tests"))
+
+
 def is_test(path: str) -> bool:
-    """Test files outside Python: __tests__/, test/, spec/, src/test/ (Java/Kotlin/Scala), *.test.*, *.spec.*, *_test.go."""
+    """
+    Test files, by real conventions only (never by substring, so testing.py or contest.py stay):
+    a directory named test, tests, __tests__, spec, specs or testdata; or a file named
+    test_*.py, *_test.py, *_test.go, *.test.(js|jsx|ts|tsx), *.spec.(js|jsx|ts|tsx), conftest.py,
+    *_spec.rb, *_test.rb, or *Test / *Tests with .java, .kt or .cs.
+    """
     parts = path.split("/")
-    name = parts[-1].lower()
-    if any(p in TEST_DIRS for p in parts[:-1]):
+    name = parts[-1]
+    if any(p.lower() in TEST_DIRS for p in parts[:-1]):
         return True
-    stem_parts = name.split(".")
-    if len(stem_parts) >= 3 and stem_parts[-2] in ("test", "spec"):
+    lower = name.lower()
+    if lower == "conftest.py" or (lower.startswith("test_") and lower.endswith(".py")):
         return True
-    return name.endswith(("_test.go", "_spec.rb", "_test.rb", "test.java", "tests.java", "test.kt", "tests.cs", "test.cs"))
+    if lower.endswith(("_test.py", "_test.go", "_spec.rb", "_test.rb")):
+        return True
+    pieces = lower.split(".")
+    if len(pieces) >= 3 and pieces[-2] in ("test", "spec") and pieces[-1] in TEST_SCRIPT_EXTS:
+        return True
+    return name.endswith(TEST_CLASS_SUFFIXES)
 
 
 def label(lang: str) -> str:

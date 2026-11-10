@@ -20,9 +20,10 @@ class NoSourceError(Exception):
     """The repo has no file in a supported language (error_code "no_source")."""
     error_code = "no_source"
 
-# Python selection rules: no path containing any of these substrings, and no empty
-# __init__.py (a non-empty one is parsed: it often re-exports the package's public API)
-PYTHON_EXCLUDE = ["test", "tests", "migrations", "__pycache__", ".venv", "node_modules", "setup.py", "conftest.py"]
+# Python selection rules: no test file (registry.is_test: real test conventions, never a
+# substring), no path containing any of these substrings, and no empty __init__.py (a non-empty
+# one is parsed: it often re-exports the package's public API)
+PYTHON_EXCLUDE = ["migrations", "__pycache__", ".venv", "node_modules", "setup.py"]
 MAX_FILE_BYTES = 100000
 # Read for entry points / import resolution; not counted as source files
 MANIFEST_NAMES = frozenset({"package.json", "go.mod", "Cargo.toml"})
@@ -51,7 +52,7 @@ def select_files(tree: list[dict]) -> tuple[list[dict], list[str]]:
         if lang is None or size > MAX_FILE_BYTES:
             continue
         if lang == "python":
-            if (name == "__init__.py" and size == 0) or any(ex in path for ex in PYTHON_EXCLUDE):
+            if (name == "__init__.py" and size == 0) or registry.is_test(path) or any(ex in path for ex in PYTHON_EXCLUDE):
                 continue
         elif registry.is_ignored(path) or registry.is_test(path):
             continue
@@ -174,31 +175,50 @@ async def latest_commit(repo_url: str) -> tuple[str, str]:
     return f"{owner}/{repo}", sha
 
 
+async def repo_info(owner: str, repo: str, client: httpx.AsyncClient) -> dict:
+    """GitHub's repo JSON. Raises RepoNotFoundError, RepoPrivateError (private repos are never read)."""
+    url = f"https://api.github.com/repos/{owner}/{repo}"
+    response = await client.get(url, timeout=10)
+    if response.status_code == 404:
+        raise RepoNotFoundError(f"Repository not found: {owner}/{repo}")
+    if response.status_code == 403:
+        raise RepoPrivateError(f"Repository is private or API limit reached: {owner}/{repo}")
+    if response.status_code != 200:
+        raise RuntimeError(f"GitHub API error {response.status_code}: {url}")
+    data = response.json()
+    if data.get("private"):
+        raise RepoPrivateError(RepoPrivateError.message)
+    return data
+
+
+async def fetch_repo_at(owner: str, repo: str, sha: str, client: httpx.AsyncClient | None = None) -> dict:
+    """
+    The repo's source files at one commit (full or short sha); same dict as fetch_repo, with
+    commit_sha shortened to 8 characters (the analysis cache key).
+    Raises FileLimitError, NoSourceError. The caller checks that the repo is public.
+    """
+    if client is None:
+        async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as own:
+            return await fetch_repo_at(owner, repo, sha, own)
+    files, manifest_paths = await _get_source_files(owner, repo, sha, client)
+    file_contents = await _fetch_file_contents(owner, repo, sha, files, client)
+    # An __init__.py with only whitespace adds nothing to the graph
+    file_contents = [f for f in file_contents if not (f["path"].endswith("__init__.py") and not f["content"].strip())]
+    manifest_contents = await _fetch_file_contents(owner, repo, sha, [{"path": p} for p in manifest_paths], client)
+    return {
+        "repo": f"{owner}/{repo}",
+        "commit_sha": sha[:8],
+        "files": file_contents,
+        "manifests": {m["path"]: m["content"] for m in manifest_contents},
+    }
+
+
 async def fetch_repo(repo_url: str) -> dict:
     """
     Main entry point. Takes a raw URL string, returns the structured dict above.
     Raises: ValueError, RepoNotFoundError, RepoPrivateError, FileLimitError, NoSourceError
     """
     owner, repo = await _parse_url(repo_url)
-    
-    headers = {
-    "Accept": "application/vnd.github.v3+json"
-    }
-
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-    
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0) as client:
-        branch, sha = await _get_default_branch_and_sha(owner, repo, client)
-        files, manifest_paths = await _get_source_files(owner, repo, sha, client)
-        file_contents = await _fetch_file_contents(owner, repo, sha, files, client)
-        # An __init__.py with only whitespace adds nothing to the graph
-        file_contents = [f for f in file_contents if not (f["path"].endswith("__init__.py") and not f["content"].strip())]
-        manifest_contents = await _fetch_file_contents(owner, repo, sha, [{"path": p} for p in manifest_paths], client)
-
-    return {
-        "repo": f"{owner}/{repo}",
-        "commit_sha": sha,
-        "files": file_contents,
-        "manifests": {m["path"]: m["content"] for m in manifest_contents},
-    }
+    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as client:
+        _branch, sha = await _get_default_branch_and_sha(owner, repo, client)
+        return await fetch_repo_at(owner, repo, sha, client)

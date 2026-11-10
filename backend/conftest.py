@@ -21,3 +21,8 @@ def _no_latest_commit_lookup(monkeypatch):
         return None
 
     monkeypatch.setattr(main, "_latest_commit", none)
+
+    async def no_pr(*_args):
+        return None
+
+    monkeypatch.setattr(main, "_latest_pr", no_pr)

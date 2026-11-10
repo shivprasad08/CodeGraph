@@ -1,17 +1,20 @@
 import { useEffect, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
 import { cn } from '../lib/cn';
-import { normalizeRepoInput, stripGitHubPrefix } from '../lib/repoInput';
+import { normalizeRepoInput, parsePrInput, stripGitHubPrefix } from '../lib/repoInput';
 import { Button, Input, focusRing } from '../ui';
 
 export const EXAMPLE_REPOS = ['psf/requests', 'pallets/flask', 'encode/starlette', 'fastapi/fastapi', 'expressjs/express'];
 export const COLD_START_DELAY_MS = 4000;
+// A merged flask PR that fits the file limit (verified end to end)
+export const EXAMPLE_PR = { path: 'pallets/flask/pull/6096', label: 'pallets/flask#6096' };
 
-const INVALID_REPO = 'Enter a repository as owner/repo, for example psf/requests.';
+const INVALID_REPO = 'Enter a repository as owner/repo (for example psf/requests) or a pull request link.';
 
 /**
  * Landing hero with the repository form.
- * @param {(repoPath: string) => Promise<void>} props.onAnalyze Starts the analysis for "owner/repo".
+ * @param {(path: string) => Promise<void>} props.onAnalyze Starts the analysis for "owner/repo", or for
+ *   a pull request as "owner/repo/pull/123".
  *   Should navigate on success and throw an Error with a readable message on failure.
  * @param {import('react').Ref<HTMLInputElement>} [props.inputRef] Lets the nav focus the field.
  * @param {() => void} [props.onSignIn] When given (signed out), a line under the field offers sign-in.
@@ -35,18 +38,19 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }
   async function handleSubmit(event) {
     event.preventDefault();
     if (submitting) return;
-    const repoPath = normalizeRepoInput(value);
-    if (!repoPath) {
+    const pr = parsePrInput(value);
+    const target = pr ? pr.path : normalizeRepoInput(value);
+    if (!target) {
       setError(INVALID_REPO);
       return;
     }
     setError('');
-    setValue(repoPath);
+    setValue(target);
     setSubmitting(true);
     try {
-      await onAnalyze(repoPath);
+      await onAnalyze(target);
     } catch (err) {
-      if (err?.code === 'rate_limited' || err?.code === 'private_repo') {
+      if (['rate_limited', 'private_repo', 'pr_unavailable'].includes(err?.code)) {
         setError(err.message); // already says what to do next (when to retry / why)
         return;
       }
@@ -59,6 +63,8 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }
       setSubmitting(false);
     }
   }
+
+  const isPr = Boolean(parsePrInput(value));
 
   function fillExample(repo) {
     setValue(repo);
@@ -90,7 +96,7 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }
               label="GitHub repository"
               size="lg"
               prefix="github.com/"
-              placeholder="owner/repo"
+              placeholder="owner/repo or a pull request link"
               autoComplete="off"
               autoCapitalize="none"
               autoCorrect="off"
@@ -112,7 +118,7 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }
               trailingIcon={<ArrowRight size={16} strokeWidth={1.5} aria-hidden="true" />}
               className="w-full min-[480px]:mt-[26px] min-[480px]:w-auto"
             >
-              Analyze repo
+              {isPr ? 'Analyze PR' : 'Analyze repo'}
             </Button>
           </div>
           <p aria-live="polite" className="mt-3 min-h-5 text-left text-cg-sm text-cg-tertiary">
@@ -156,6 +162,22 @@ export default function Hero({ onAnalyze, inputRef, initialRepo = '', onSignIn }
               </button>
             </span>
           ))}
+        </p>
+        <p className="mt-1 text-cg-sm text-cg-secondary">
+          <span className="text-cg-tertiary">Try a PR </span>
+          <button
+            type="button"
+            onClick={() => fillExample(EXAMPLE_PR.path)}
+            className={cn(
+              'rounded font-cg-mono text-cg-secondary underline decoration-cg-border-strong underline-offset-4',
+              'transition-colors duration-cg-fast ease-cg hover:text-cg-text hover:decoration-cg-text',
+              '[@media(pointer:coarse)]:inline-flex [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:items-center',
+              focusRing,
+            )}
+          >
+            {EXAMPLE_PR.label}
+          </button>
+          <span className="text-cg-tertiary"> — see what a change touches</span>
         </p>
         <p className="mt-2 text-cg-sm text-cg-tertiary">Free · open source · repos up to 60 source files</p>
       </div>

@@ -7,6 +7,7 @@ import { fetchShare, setShareToken } from '../api';
 import { buttonClasses, Spinner } from '../ui';
 import { TopBarFrame } from '../components/app/AppTopBar';
 import ShareableGraphView from './ShareableGraphView';
+import PRView from './PRView';
 
 export default function SharedView() {
   const { token } = useParams();
@@ -35,6 +36,17 @@ export default function SharedView() {
   useEffect(() => {
     if (state === 'gone') document.title = 'CodeGraph — Link not available';
   }, [state]);
+
+  if (state === 'ready' && data.kind === 'pr') {
+    return (
+      <PRView
+        key={token}
+        staticResult={data.result}
+        jobId={data.job_id}
+        shared={{ sharedBy: data.share.shared_by, expiresAt: data.share.expires_at }}
+      />
+    );
+  }
 
   if (state === 'ready') {
     return (

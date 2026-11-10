@@ -24,7 +24,7 @@ function verdictLine(grade, counts) {
 }
 
 /** 64px ring: track in the border colour, progress in the text colour. No traffic lights. */
-function ScoreRing({ score }) {
+export function ScoreRing({ score }) {
   const r = 28;
   const c = 2 * Math.PI * r;
   return (

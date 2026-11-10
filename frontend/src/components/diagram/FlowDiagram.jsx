@@ -333,6 +333,7 @@ export function layoutSpec(spec, { aspect = null } = {}) {
         back,
         label: e.label ?? null,
         weight: e.weight ?? 1,
+        dashed: Boolean(e.dashed),
         labelX: (s.x + t.x) / 2,
         labelY: (s.y + t.y) / 2,
       };
@@ -360,6 +361,8 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
       .slice(0, ALWAYS_LABELLED)
       .map((e) => e.id),
   );
+  // Dashed edges (e.g. "new" in a PR) always carry their label
+  for (const e of layout.edges) if (e.dashed && e.label) top.add(e.id);
   const active = new Set(
     layout.edges
       .filter((e) => e.id === activeEdgeId || (activeNodeId && (e.source === activeNodeId || e.target === activeNodeId)))
@@ -376,7 +379,9 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
 
   return {
     nodes: layout.nodes.map((n) =>
-      n.data?.isGroup ? n : { ...n, className: cn(focusOn && !litNodes.has(n.id) && 'cg-flow-dim') || undefined },
+      n.data?.isGroup
+        ? n
+        : { ...n, className: cn(((focusOn && !litNodes.has(n.id)) || (!focusOn && n.data?.muted)) && 'cg-flow-dim') || undefined },
     ),
     edges: layout.edges.map((e) => {
       const on = active.has(e.id);
@@ -395,7 +400,7 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
         data: { weight: e.weight },
         zIndex: on ? 1 : 0,
         className: cn(focusOn && !on && 'cg-flow-dim', on && 'cg-flow-active') || undefined,
-        style: { stroke: color, strokeWidth: width },
+        style: { stroke: color, strokeWidth: width, ...(e.dashed ? { strokeDasharray: '6 4' } : {}) },
         markerEnd: { type: MarkerType.ArrowClosed, color, width: arrow, height: arrow, markerUnits: 'userSpaceOnUse' },
         labelStyle: { fill: on ? tokens.text : tokens.secondary, fontSize: LABEL_FONT, fontFamily: 'var(--cg-font-sans)' },
         labelBgStyle: { fill: tokens.canvas },
@@ -419,7 +424,8 @@ function DiagramNode({ data }) {
   return (
     <div
       className={cn(
-        'flex h-full w-full flex-col justify-center rounded-cg-control border border-cg-border bg-cg-raised px-3 shadow-cg-edge',
+        'flex h-full w-full flex-col justify-center rounded-cg-control border bg-cg-raised px-3 shadow-cg-edge',
+        data.highlight ? 'border-cg-text' : 'border-cg-border',
         data.clickable && 'cursor-pointer transition-colors duration-cg-fast ease-cg hover:border-cg-border-strong hover:bg-cg-hover',
       )}
       title={data.nodeRef || data.label}

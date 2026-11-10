@@ -12,8 +12,12 @@ const STAGES = [
 
 const formatElapsed = (sec) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 
-/** Analysis progress for a running job: bar, stages, live message and elapsed time. */
-export default function ProgressBar({ progress = 0, stage, message, startedAt, repo }) {
+/**
+ * Analysis progress for a running job: bar, stages, live message and elapsed time.
+ * @param {Array<{id: string, label: string}>} [props.stages] Defaults to the repository stages.
+ * @param {import('react').ReactNode} [props.title] Defaults to "Analyzing <repo>".
+ */
+export default function ProgressBar({ progress = 0, stage, message, startedAt, repo, stages = STAGES, title }) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -24,13 +28,13 @@ export default function ProgressBar({ progress = 0, stage, message, startedAt, r
     return () => clearInterval(id);
   }, [startedAt]);
 
-  const current = Math.max(0, STAGES.findIndex((s) => s.id === stage || (stage === 'queued' && s.id === 'ingestion')));
+  const current = Math.max(0, stages.findIndex((s) => s.id === stage || (stage === 'queued' && s === stages[0])));
   const pct = Math.max(0, Math.min(100, Math.round(progress || 0)));
 
   return (
     <section aria-labelledby="progress-title" className="w-full max-w-md rounded-cg-panel border border-cg-border bg-cg-raised p-6 font-cg-sans shadow-cg-edge">
       <h1 id="progress-title" className="text-cg-lg font-semibold text-cg-text">
-        Analyzing {repo ? <span className="font-cg-mono font-medium">{repo}</span> : 'repository'}
+        {title ?? <>Analyzing {repo ? <span className="font-cg-mono font-medium">{repo}</span> : 'repository'}</>}
       </h1>
       <p className="mt-1 text-cg-sm text-cg-secondary">The first request on the free tier can take up to a minute.</p>
 
@@ -46,7 +50,7 @@ export default function ProgressBar({ progress = 0, stage, message, startedAt, r
       </div>
 
       <ol className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-cg-xs">
-        {STAGES.map((s, i) => (
+        {stages.map((s, i) => (
           <li
             key={s.id}
             aria-current={i === current ? 'step' : undefined}
