@@ -1,3 +1,4 @@
+import { languageBreakdown } from '../lib/languages';
 import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { cn } from '../lib/cn';
@@ -71,6 +72,38 @@ function HealthSkeleton() {
  * @param {(node) => void} props.onNodeSelect Select a node (zoom + Details).
  * @param {(node, line?) => void} props.onViewSource Open the code view at a line.
  */
+const percent = (share) => (share > 0 && share < 0.01 ? '<1%' : `${Math.round(share * 100)}%`);
+const LANG_COLOR = (i) => `var(--cg-cluster-${(i % 8) + 1})`;
+
+/** Share of each language (by lines of code; by files for older graphs). */
+export function LanguageBar({ graph }) {
+  const rows = languageBreakdown(graph);
+  if (!rows.length) return null;
+  const summary = rows.map((r) => `${r.name} ${percent(r.share)}`).join(', ');
+  return (
+    <section>
+      <h3 className="text-cg-xs font-medium text-cg-secondary">Languages</h3>
+      <div role="img" aria-label={summary} className="mt-2 flex h-2 overflow-hidden rounded-full bg-cg-raised">
+        {rows.map((r, i) => (
+          <span key={r.lang} style={{ width: `${r.share * 100}%`, backgroundColor: LANG_COLOR(i) }} />
+        ))}
+      </div>
+      <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-cg-xs" aria-hidden="true">
+        {rows.map((r, i) => (
+          <li key={r.lang} className="flex items-center gap-1.5">
+            <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: LANG_COLOR(i) }} />
+            <span className="text-cg-text">{r.name}</span>
+            <span className="tabular-nums text-cg-secondary">{percent(r.share)}</span>
+            <span className="tabular-nums text-cg-tertiary">
+              · {r.files} {r.files === 1 ? 'file' : 'files'}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export default function HealthPanel({ analysis, graph, isLoading, onNodeSelect, onViewSource }) {
   const [filter, setFilter] = useState('all');
   const [openGroups, setOpenGroups] = useState(null); // null = default set
@@ -156,6 +189,8 @@ export default function HealthPanel({ analysis, graph, isLoading, onNodeSelect, 
           </div>
         ))}
       </dl>
+
+      <LanguageBar graph={graph} />
 
       {analysis.patterns?.length > 0 && (
         <section>

@@ -9,3 +9,6 @@ cache/
 
 .test-venv/
 .security-test-venv/
+
+# Built inside the image by scripts/fetch_grammars.py (a host cache has the wrong platform)
+.grammars/

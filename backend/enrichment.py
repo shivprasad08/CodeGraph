@@ -15,6 +15,8 @@ import config
 from groq import AsyncGroq, RateLimitError
 from mistralai.client.sdk import Mistral
 
+from languages import registry
+
 # ---------------------------------------------------------------------------
 # Module-level LLM clients (initialized once when API keys are available)
 # ---------------------------------------------------------------------------
@@ -43,7 +45,8 @@ class MistralRateLimitError(RuntimeError):
 
 SYSTEM_PROMPT = (
     "You are a senior software engineer explaining code to a new team member.\n"
-    "You will receive a list of functions and classes from a Python file.\n"
+    "You will receive a list of functions, methods and classes from one source file;\n"
+    "the message names the file's language. Use that language's terminology.\n"
     "For each one, write a single plain English sentence (max 20 words) that "
     "explains what it does — not how it does it.\n"
     "Be specific. Avoid filler like \"This function...\" or \"This class...\".\n"
@@ -56,12 +59,16 @@ SYSTEM_PROMPT = (
 # ---------------------------------------------------------------------------
 def _build_prompt(file_path: str, nodes: list[dict]) -> str:
     """Builds the user prompt string from file path and node list."""
+    langs = sorted({n.get("lang") for n in nodes if n.get("lang")})
+    language = ", ".join(registry.label(lang) for lang in langs) or "unknown"
     items = []
     for node in nodes:
         item = {
             "name": _summary_key(node),
-            "type": node.get("type", "function"),
+            "type": node.get("kind") or node.get("type", "function"),
         }
+        if node.get("lang"):
+            item["lang"] = node["lang"]
         # Include parameters if present (functions have them in the id or
         # we extract from the node dict)
         if "parameters" in node:
@@ -72,10 +79,11 @@ def _build_prompt(file_path: str, nodes: list[dict]) -> str:
         items.append(item)
 
     return (
-        f"File: {file_path}\n\n"
+        f"File: {file_path}\n"
+        f"Language: {language}\n\n"
         f"Functions and classes to explain:\n"
         f"{json.dumps(items, separators=(',', ':'))}\n\n"
-        f"Respond with a JSON object where each key is the exact function/class name\n"
+        f"Respond with a JSON object where each key is the exact name given above\n"
         f"and the value is a one-sentence plain English summary (max 20 words).\n"
         f"Example format:\n"
         f'{{\n'

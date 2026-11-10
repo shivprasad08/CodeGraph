@@ -1,6 +1,9 @@
 # What it does: builds the code graph (nodes + calls/imports/defines edges) from parser output
 # Module 3: Graph builder
 #
+# Python files use the scope-aware resolver below (full support). Files in other
+# languages are linked by generic_resolver.GenericLinker (basic support, name-based).
+#
 # Calls are resolved through each file's scope (local definitions, imports, the
 # enclosing class and its bases) instead of by bare name, so `x.get()` no longer
 # links to every function called `get`. Each call edge carries a confidence:
@@ -13,8 +16,10 @@ from collections import OrderedDict
 
 import networkx as nx
 
+from generic_resolver import GenericLinker
+
 # Bump when node ids or edge semantics change; part of the cache key so old graphs are not reused
-GRAPH_SCHEMA_VERSION = 3
+GRAPH_SCHEMA_VERSION = 4
 
 # Method names too common to infer from an unknown receiver (dict.get, list.append, file.close…)
 GENERIC_METHOD_STOPLIST = frozenset({
@@ -106,8 +111,11 @@ class _ModuleIndex:
 # Builder
 # ---------------------------------------------------------------------------
 class _Builder:
-    def __init__(self, parsed_files):
-        self.files = sorted(parsed_files, key=lambda f: f["path"])
+    def __init__(self, parsed_files, manifests=None):
+        all_files = sorted(parsed_files, key=lambda f: f["path"])
+        self.files = [f for f in all_files if f.get("lang", "python") == "python"]
+        self.generic = GenericLinker(self, [f for f in all_files if f.get("lang", "python") != "python"],
+                                     manifests, GENERIC_METHOD_STOPLIST)
         self.index = _ModuleIndex(f["path"] for f in self.files)
         self.nodes = OrderedDict()   # id -> node dict
         self.edges = OrderedDict()   # (source, target, type) -> confidence
@@ -138,7 +146,7 @@ class _Builder:
         for f in self.files:
             path = f["path"]
             self.nodes[path] = {
-                "id": path, "label": path, "type": "file", "file": path,
+                "id": path, "label": path, "type": "file", "file": path, "lang": "python",
                 "summary": "", "lines": [], "centrality": 0.0, "is_entry_point": False,
             }
             if f.get("doc"):
@@ -147,7 +155,7 @@ class _Builder:
             for cls in f.get("classes", []):
                 cid = cls["id"]
                 self.nodes[cid] = {
-                    "id": cid, "label": cls["name"], "type": "class", "file": path,
+                    "id": cid, "label": cls["name"], "type": "class", "kind": "class", "lang": "python", "file": path,
                     "qualified_name": cls.get("qualified_name", cls["name"]),
                     "summary": "", "lines": [cls["start_line"], cls["end_line"]],
                     "centrality": 0.0, "is_entry_point": False,
@@ -164,7 +172,8 @@ class _Builder:
             for fn in f.get("functions", []):
                 fid = fn["id"]
                 node = {
-                    "id": fid, "label": fn["name"], "type": "function", "file": path,
+                    "id": fid, "label": fn["name"], "type": "function", "lang": "python", "file": path,
+                    "kind": "method" if fn.get("is_method") else "function",
                     "qualified_name": fn.get("qualified_name", fn["name"]),
                     "summary": "", "lines": [fn["start_line"], fn["end_line"]],
                     "centrality": 0.0, "is_entry_point": False,
@@ -521,6 +530,7 @@ class _Builder:
         for (s, t, etype) in self.edges:
             if etype == "calls" and s != t and self.nodes[s]["type"] != "file":
                 fn_callers[t] = fn_callers.get(t, 0) + 1
+        self.generic.mark_entry_points(fn_callers)
         for fid, fn in self.functions.items():
             name = fn["name"]
             if _is_dunder(name) or fn_callers.get(fid):
@@ -534,10 +544,13 @@ class _Builder:
                 self.nodes[fid]["is_entry_point"] = True
 
     # -- output -----------------------------------------------------------------------
-    def build(self, repo, commit_sha):
+    def build(self, repo, commit_sha, languages=None):
         self.collect()
+        self.generic.collect()
         self.link_imports()
+        self.generic.link_imports()
         self.link_calls()
+        self.generic.link_calls()
         self.mark_entry_points()
 
         G = nx.DiGraph()
@@ -561,9 +574,10 @@ class _Builder:
             "schema_version": GRAPH_SCHEMA_VERSION,
             "nodes": list(self.nodes.values()),
             "edges": edges,
+            "languages": languages or [],
             "stats": {
-                "call_sites_total": self.sites_total,
-                "call_sites_resolved": self.sites_resolved,
+                "call_sites_total": self.sites_total + self.generic.sites_total,
+                "call_sites_resolved": self.sites_resolved + self.generic.sites_resolved,
                 "calls_exact": sum(1 for e in calls if e["confidence"] == EXACT),
                 "calls_inferred": sum(1 for e in calls if e["confidence"] == INFERRED),
                 "entry_points": sum(1 for n in self.nodes.values() if n.get("is_entry_point")),
@@ -572,5 +586,7 @@ class _Builder:
 
 
 def build_graph(parse_output: dict) -> dict:
-    builder = _Builder(parse_output.get("parsed_files", []))
-    return builder.build(parse_output.get("repo", ""), parse_output.get("commit_sha", ""))
+    builder = _Builder(parse_output.get("parsed_files", []), parse_output.get("manifests"))
+    return builder.build(
+        parse_output.get("repo", ""), parse_output.get("commit_sha", ""), parse_output.get("languages"),
+    )

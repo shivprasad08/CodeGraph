@@ -45,3 +45,6 @@ aws/
 awscliv2.zip
 k8s/02-secret.yaml
 k8s/02-secret.yaml
+
+# tree-sitter grammar cache (downloaded by backend/scripts/fetch_grammars.py)
+backend/.grammars/

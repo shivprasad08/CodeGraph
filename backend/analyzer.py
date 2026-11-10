@@ -3,117 +3,179 @@ import re
 import uuid
 import networkx as nx
 
+from languages import registry
+
+# ---------------------------------------------------------------------------
+# Line rules: shared (all languages) + per-language rule packs
+# ---------------------------------------------------------------------------
+# Hardcoded secrets (shared)
+SECRET_PATTERNS = [
+    (r'(password|passwd|pwd)\s*=\s*["\'][^"\']{4,}["\']', "password"),
+    (r'(api_key|apikey|api_secret)\s*=\s*["\'][^"\']{8,}["\']', "api_key"),
+    (r'(secret_key|secret)\s*=\s*["\'][^"\']{8,}["\']', "secret_key"),
+    (r'(token)\s*=\s*["\'][^"\']{10,}["\']', "token"),
+    (r'(aws_access_key_id|aws_secret)\s*=\s*["\']', "aws_key")
+]
+SECRET_EXCLUDE_TERMS = ["example", "placeholder", "your_", "YOUR_", "<", ">", "os.getenv", "os.environ", "config.",
+                        "process.env", "System.getenv", "os.Getenv", "env::var", "ENV["]
+
+# Comment markers per language (TODO detection, skipping commented-out code)
+HASH_COMMENT_LANGS = frozenset({"python", "ruby"})
+TODO_PATTERNS = {
+    "hash": re.compile(r'#\s*(TODO|FIXME|HACK|XXX|BUG)[\s:](.*)', re.IGNORECASE),
+    "slash": re.compile(r'(?://|/\*|^\s*\*)\s*(TODO|FIXME|HACK|XXX|BUG)[\s:](.*)', re.IGNORECASE),
+    "dash": re.compile(r'--\s*(TODO|FIXME|HACK|XXX|BUG)[\s:](.*)', re.IGNORECASE),
+}
+
+
+def _comment_style(lang: str) -> str:
+    if lang in HASH_COMMENT_LANGS:
+        return "hash"
+    return "dash" if lang == "lua" else "slash"
+
+
+def _is_comment_line(line: str, style: str) -> bool:
+    stripped = line.lstrip()
+    if style == "hash":
+        return stripped.startswith("#")
+    if style == "dash":
+        return stripped.startswith("--")
+    return stripped.startswith(("//", "/*", "*"))
+
+
+def _issue(file_path, line, severity, kind, message, function=None):
+    return {"id": str(uuid.uuid4()), "file": file_path, "line": line, "severity": severity,
+            "type": kind, "message": message, "function": function}
+
+
+# Python rule pack (unchanged rules)
+PY_SQL_INJECTION = re.compile(r'execute\s*\(\s*f["\']|execute\s*\(\s*["\'].*\+.*["\']')
+PY_EVAL = re.compile(r'\beval\s*\(')
+PY_DEBUG = [
+    re.compile(r'\bpdb\.set_trace\(\)'),
+    re.compile(r'\bbreakpoint\(\)'),
+    re.compile(r'\bprint\s*\(\s*["\']DEBUG'),
+]
+
+
+def _python_rules(file_path, line_idx, line, is_comment, is_test_file):
+    out = []
+    if not is_comment:
+        if PY_SQL_INJECTION.search(line):
+            out.append(_issue(file_path, line_idx, "high", "security", "Potential SQL injection via string formatting"))
+        if PY_EVAL.search(line):
+            out.append(_issue(file_path, line_idx, "high", "security", "Use of eval() — arbitrary code execution risk"))
+    if not is_test_file and not is_comment:
+        for d_pat in PY_DEBUG:
+            if d_pat.search(line):
+                out.append(_issue(file_path, line_idx, "medium", "quality", "Debug statement left in production code"))
+                break
+    return out
+
+
+# JavaScript / TypeScript rule pack
+JS_RULES = [
+    (re.compile(r'(?<![\w.$])eval\s*\('), "high", "security", "Use of eval() — arbitrary code execution risk"),
+    (re.compile(r'\bnew\s+Function\s*\('), "high", "security", "new Function() — arbitrary code execution risk"),
+    (re.compile(r'\.(?:inner|outer)HTML\s*(?:\+?=)(?!=)'), "medium", "security",
+     "Assigning innerHTML/outerHTML — XSS risk unless the value is sanitized"),
+    (re.compile(r'\bdangerouslySetInnerHTML\b'), "medium", "security",
+     "dangerouslySetInnerHTML — XSS risk unless the value is sanitized"),
+    (re.compile(r'\b(?:exec|execSync|spawn|spawnSync)\s*\(\s*`[^`]*\$\{'), "high", "security",
+     "Shell command built from a template string — command injection risk"),
+]
+JS_DEBUG = re.compile(r'^\s*debugger\s*;?\s*$')
+
+
+def _js_rules(file_path, line_idx, line, is_comment, is_test_file):
+    if is_comment:
+        return []
+    out = [_issue(file_path, line_idx, sev, kind, msg) for pat, sev, kind, msg in JS_RULES if pat.search(line)]
+    if not is_test_file and JS_DEBUG.search(line):
+        out.append(_issue(file_path, line_idx, "medium", "quality", "Debug statement left in production code"))
+    return out
+
+
+RULE_PACKS = {"python": _python_rules, "javascript": _js_rules, "typescript": _js_rules}
+
+# Language-agnostic structure thresholds
+LONG_FUNCTION_LINES = 50
+LARGE_FILE_LOC = 600
+DEEP_NESTING = 5
+DUPLICATE_NAME_IGNORE = frozenset({"main", "__init__", "init", "index", "constructor", "setup", "run", "new",
+                                   "default", "render", "handler", "handle", "App"})
+
+
 def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
     """
     Analyzes the repo for security, quality, and patterns.
+    Line rules: shared secrets/TODO checks plus a rule pack per language (Python, JS/TS).
+    Structure: long functions, large files, deep nesting, duplicate names, circular imports.
     """
     issues = []
     patterns = []
-    
+    lang_of = {pf.get("path"): pf.get("lang", "python") for pf in parse_output.get("parsed_files", [])}
+
     # 1. File-level Security and Quality Issues
-    # Hardcoded secrets patterns
-    secret_patterns = [
-        (r'(password|passwd|pwd)\s*=\s*["\'][^"\']{4,}["\']', "password"),
-        (r'(api_key|apikey|api_secret)\s*=\s*["\'][^"\']{8,}["\']', "api_key"),
-        (r'(secret_key|secret)\s*=\s*["\'][^"\']{8,}["\']', "secret_key"),
-        (r'(token)\s*=\s*["\'][^"\']{10,}["\']', "token"),
-        (r'(aws_access_key_id|aws_secret)\s*=\s*["\']', "aws_key")
-    ]
-    secret_exclude_terms = ["example", "placeholder", "your_", "YOUR_", "<", ">", "os.getenv", "os.environ", "config."]
-    
-    sql_injection_pattern = re.compile(r'execute\s*\(\s*f["\']|execute\s*\(\s*["\'].*\+.*["\']')
-    eval_pattern = re.compile(r'\beval\s*\(')
-    
-    debug_patterns = [
-        re.compile(r'\bpdb\.set_trace\(\)'),
-        re.compile(r'\bbreakpoint\(\)'),
-        re.compile(r'\bprint\s*\(\s*["\']DEBUG')
-    ]
-    
-    todo_pattern = re.compile(r'#\s*(TODO|FIXME|HACK|XXX|BUG)[\s:](.*)', re.IGNORECASE)
-    
     for file_path, content in source_files.items():
         if not content:
             continue
-        
-        is_test_file = file_path.startswith("test_") or "/test_" in file_path or "/tests/" in file_path
-        
+        lang = lang_of.get(file_path) or registry.language_of(file_path) or "python"
+        style = _comment_style(lang)
+        todo_pattern = TODO_PATTERNS[style]
+        pack = RULE_PACKS.get(lang)
+        if lang == "python":
+            is_test_file = file_path.startswith("test_") or "/test_" in file_path or "/tests/" in file_path
+        else:
+            is_test_file = registry.is_test(file_path)
+
         lines = content.split('\n')
         for i, line in enumerate(lines):
             line_idx = i + 1
-            # Exclude comments for eval and SQL, but we might just do a basic check
-            is_comment = line.lstrip().startswith('#')
-            
+            is_comment = _is_comment_line(line, style)
+
             # Check secrets
             if not is_comment:
-                has_exclude = any(term in line for term in secret_exclude_terms)
+                has_exclude = any(term in line for term in SECRET_EXCLUDE_TERMS)
                 if not has_exclude:
-                    for pat, type_str in secret_patterns:
+                    for pat, type_str in SECRET_PATTERNS:
                         if re.search(pat, line, re.IGNORECASE):
-                            issues.append({
-                                "id": str(uuid.uuid4()),
-                                "file": file_path,
-                                "line": line_idx,
-                                "severity": "high",
-                                "type": "security",
-                                "message": f"Possible hardcoded {type_str} detected",
-                                "function": None
-                            })
-                            break # One secret per line is enough
-                
-                # Check SQL Injection
-                if sql_injection_pattern.search(line):
-                    issues.append({
-                        "id": str(uuid.uuid4()),
-                        "file": file_path,
-                        "line": line_idx,
-                        "severity": "high",
-                        "type": "security",
-                        "message": "Potential SQL injection via string formatting",
-                        "function": None
-                    })
-                    
-                # Check Dangerous Eval
-                if eval_pattern.search(line):
-                    issues.append({
-                        "id": str(uuid.uuid4()),
-                        "file": file_path,
-                        "line": line_idx,
-                        "severity": "high",
-                        "type": "security",
-                        "message": "Use of eval() — arbitrary code execution risk",
-                        "function": None
-                    })
-            
-            # Check Debug Statements
-            if not is_test_file and not is_comment:
-                for d_pat in debug_patterns:
-                    if d_pat.search(line):
-                        issues.append({
-                            "id": str(uuid.uuid4()),
-                            "file": file_path,
-                            "line": line_idx,
-                            "severity": "medium",
-                            "type": "quality",
-                            "message": "Debug statement left in production code",
-                            "function": None
-                        })
-                        break
-                        
+                            issues.append(_issue(file_path, line_idx, "high", "security", f"Possible hardcoded {type_str} detected"))
+                            break  # One secret per line is enough
+
+            if pack is not None:
+                issues.extend(pack(file_path, line_idx, line, is_comment, is_test_file))
+
             # Check TODO/FIXME
             todo_match = todo_pattern.search(line)
             if todo_match:
                 content_match = todo_match.group(2).strip()[:60]
-                issues.append({
-                    "id": str(uuid.uuid4()),
-                    "file": file_path,
-                    "line": line_idx,
-                    "severity": "low",
-                    "type": "quality",
-                    "message": f"TODO/FIXME comment: {content_match}",
-                    "function": None
-                })
-                
+                issues.append(_issue(file_path, line_idx, "low", "quality", f"TODO/FIXME comment: {content_match}"))
+
+    # 1b. Language-agnostic structure: large files, deep nesting, duplicate names
+    defined_in = {}
+    for pf in parse_output.get("parsed_files", []):
+        path = pf.get("path")
+        if pf.get("loc", 0) > LARGE_FILE_LOC:
+            issues.append(_issue(path, 1, "low", "quality", f"Large file: {pf['loc']} lines of code — consider splitting it"))
+        for sym in pf.get("symbols", []):
+            if sym.get("nesting", 0) >= DEEP_NESTING:
+                issues.append(_issue(path, sym["start_line"], "low", "quality",
+                                     f"{sym['name']} nests control flow {sym['nesting']} levels deep", sym["name"]))
+            if sym.get("top_level", True) and not sym.get("class_name") and sym["name"] not in DUPLICATE_NAME_IGNORE \
+                    and not sym["name"].startswith("_"):
+                defined_in.setdefault((sym["kind"] in ("function", "method"), sym["name"]), []).append((path, sym["start_line"]))
+    for (_is_fn, name), places in sorted(defined_in.items()):
+        files = sorted({p for p, _ in places})
+        if len(files) > 1:
+            first_file, first_line = min(places)
+            # Basenames, unless two files share one (server/src/x.js vs shared/x.js): then paths
+            bases = [f.split("/")[-1] for f in files]
+            shown = files if len(set(bases)) < len(bases) else bases
+            others = ", ".join(s for f, s in zip(files, shown) if f != first_file)
+            issues.append(_issue(first_file, first_line, "info", "quality",
+                                 f"{name} is also defined in {others} — the same name in {len(files)} files", name))
+
     # 2. Graph & Parse Output based issues
     functions = [n for n in graph.get("nodes", []) if n.get("type") == "function"]
     classes = [n for n in graph.get("nodes", []) if n.get("type") == "class"]
@@ -132,7 +194,7 @@ def analyze_repo(parse_output: dict, source_files: dict, graph: dict) -> dict:
         end_line = fn.get("lines", [0, 0])[1]
         length = end_line - start_line if end_line and start_line else 0
         
-        if length > 50:
+        if length > LONG_FUNCTION_LINES:
             issues.append({
                 "id": str(uuid.uuid4()),
                 "file": fn.get("file"),

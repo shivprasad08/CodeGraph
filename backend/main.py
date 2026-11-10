@@ -26,7 +26,7 @@ import config
 import chat
 import impact
 from models import AnalyzeRequest, GraphResponse, ImpactRequest
-from ingestion import RepoNotFoundError, FileLimitError
+from ingestion import RepoNotFoundError, FileLimitError, NoSourceError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,9 +79,24 @@ class TimeoutMiddleware(BaseHTTPMiddleware):
 # ---------------------------------------------------------------------------
 # Lifespan and App initialization
 # ---------------------------------------------------------------------------
+def _check_grammar_cache() -> None:
+    """Grammars are fetched at build time (scripts/fetch_grammars.py); say so loudly if that step was skipped."""
+    from languages import registry
+
+    missing = sorted(set(registry.GRAMMARS) - registry.cached_grammars())
+    if missing:
+        logger.warning(
+            f"[languages] {len(missing)} grammar(s) missing from {registry.grammar_dir()}: {', '.join(missing)}. "
+            "Files in those languages will be skipped. Run `python scripts/fetch_grammars.py` in the build step."
+        )
+    else:
+        logger.info(f"[languages] all {len(registry.GRAMMARS)} grammars cached in {registry.grammar_dir()}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.validate_config()
+    _check_grammar_cache()
     task = asyncio.create_task(_cleanup_old_jobs())
     yield
     task.cancel()
@@ -145,7 +160,11 @@ async def _run_pipeline(job_id: str, repo_url: str) -> None:
             return
         except FileLimitError as e:
             logger.warning(f"File limit error for {repo_url}: {e}")
-            job.update({"status": "error", "error": str(e)})
+            job.update({"status": "error", "error": str(e), "error_code": "file_limit"})
+            return
+        except NoSourceError as e:
+            logger.warning(f"No supported source files in {repo_url}: {e}")
+            job.update({"status": "error", "error": str(e), "error_code": NoSourceError.error_code})
             return
         except Exception as e:
             logger.error(f"Ingestion failed for {repo_url}: {e}", exc_info=True)
@@ -336,6 +355,7 @@ async def get_or_analyze_repo(owner: str, repo: str, background_tasks: Backgroun
         "stage": "queued",
         "message": "Queued",
         "error": None,
+        "error_code": None,
         "graph": None,
         "ip": ip,
         "created_at": datetime.now(timezone.utc)
@@ -387,6 +407,7 @@ async def analyze(request: Request, body: AnalyzeRequest, background_tasks: Back
         "stage": "queued",
         "message": "Queued",
         "error": None,
+        "error_code": None,
         "graph": None,
         "ip": ip,
         "created_at": datetime.now(timezone.utc)
@@ -414,7 +435,8 @@ async def get_job(job_id: str):
                 "progress": job["progress"],
                 "stage": job["stage"],
                 "message": job["message"],
-                "error": job["error"]
+                "error": job["error"],
+                "error_code": job.get("error_code"),
             }
             yield f"data: {json.dumps(data)}\n\n"
 

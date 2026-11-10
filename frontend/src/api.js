@@ -29,7 +29,7 @@ export function subscribeToJob(jobId, onEvent, onError, onDone) {
         onDone(data);
         eventSource.close();
       } else if (data.status === 'error') {
-        onError(data.error);
+        onError(data.error, data.error_code ?? null);
         eventSource.close();
       }
     } catch (err) {

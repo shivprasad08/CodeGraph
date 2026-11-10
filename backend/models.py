@@ -33,6 +33,7 @@ class GraphResponse(BaseModel):
     edges: List[GraphEdge]
     schema_version: Optional[int] = None
     architecture: Optional[dict] = None  # modules, edges, method, hidden (architecture.py)
+    languages: Optional[List[dict]] = None  # [{lang, label, files, loc}]
 
 class ImpactRequest(BaseModel):
     source_node_id: str

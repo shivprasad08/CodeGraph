@@ -14,8 +14,8 @@ import Reveal from '../components/landing/Reveal';
 const STACK = ['tree-sitter', 'networkx', 'FastAPI', 'SSE streaming', 'commit-SHA cache', 'Groq / Mistral'];
 
 const LIMITS = [
-  'Python repositories only',
-  'Up to 60 files',
+  'Full support: Python. Basic support: JavaScript, TypeScript, Java, Go, Rust, C/C++, C#, Ruby, PHP and more.',
+  'Up to 60 source files',
   'AI summaries cover the 60 most-connected functions',
   'Runs on a free tier, so the first request may take a minute',
 ];
@@ -25,7 +25,7 @@ export default function LandingPageView() {
   const inputRef = useRef(null);
 
   useEffect(() => {
-    document.title = 'CodeGraph — Map any Python codebase';
+    document.title = 'CodeGraph — Map any codebase';
   }, []);
 
   // Same flow as before: start the job, then open its graph page. Errors propagate to Hero.

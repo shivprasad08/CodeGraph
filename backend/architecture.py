@@ -12,8 +12,12 @@ from collections import Counter, defaultdict
 
 import networkx as nx
 
+from languages import registry
+
 HIDDEN_DIRS = frozenset({"tests", "test", "scripts", "examples", "docs", "migrations"})
-HIDDEN_FILES = frozenset({"setup.py", "conftest.py"})
+HIDDEN_FILES = frozenset({"setup.py", "conftest.py", "gulpfile.js", "Gruntfile.js"})
+# Tooling config (vite.config.js, tailwind.config.ts, jest.config.cjs…) is not architecture
+CONFIG_FILE_RE = re.compile(r"\.config\.[cm]?[jt]s$|^\.[\w-]+rc\.[cm]?[jt]s$")
 MIN_GROUPS, MAX_GROUPS = 4, 15
 MAX_SHARE = 0.6
 MAX_DEPTH = 4
@@ -30,14 +34,30 @@ def is_hidden(path: str) -> bool:
     name = parts[-1]
     if any(p in HIDDEN_DIRS for p in parts[:-1]) or name in HIDDEN_FILES:
         return True
-    return name.startswith("test_") or name.endswith("_test.py")
+    if name.startswith("test_") or name.endswith("_test.py"):
+        return True
+    if CONFIG_FILE_RE.search(name):
+        return True
+    # Other languages: __tests__/, *.test.*, *.spec.*, src/test/, *_test.go…
+    return not name.endswith(".py") and registry.is_test(path)
+
+
+# Files named after their package rather than themselves
+PACKAGE_FILE_STEMS = frozenset({"__init__", "mod", "index"})
+GENERIC_DIR_NAMES = frozenset({"src", "lib", "app", "pkg", "source"})
 
 
 def _stem(path: str) -> str:
+    """File name without extension; a package file (__init__.py, mod.rs, index.js) is named after its directory."""
     name = posixpath.basename(path)
-    if name == "__init__.py":
-        return posixpath.basename(posixpath.dirname(path)) or "__init__"
-    return name[:-3] if name.endswith(".py") else name
+    stem = posixpath.splitext(name)[0] if registry.language_of(name) else name
+    if stem in PACKAGE_FILE_STEMS:
+        parent = posixpath.dirname(path)
+        name = posixpath.basename(parent) or stem
+        if name in GENERIC_DIR_NAMES and posixpath.dirname(parent):
+            name = f"{posixpath.basename(posixpath.dirname(parent))}/{name}"  # server/src, not src
+        return name
+    return stem
 
 
 def _common_dir(paths: list[str]) -> list[str]:
@@ -203,7 +223,7 @@ def build_architecture(graph: dict) -> dict:
                 others = len(members) - 1
                 label = name + (f" + {others} files" if others > 1 else " + 1 file" if others == 1 else "")
         elif kind == "file":
-            label = _stem(key)
+            label = _stem(members[0])  # one file grouped on its own
         else:
             label = key.rsplit("/", 1)[-1]
         modules.append({"key": key, "label": label, "files": members})
@@ -214,6 +234,11 @@ def build_architecture(graph: dict) -> dict:
         if counts[m["label"]] > 1 and m["key"] and "/" in m["key"].rstrip("/"):
             parent = m["key"].rsplit("/", 1)[0].rsplit("/", 1)[-1]
             m["label"] = f"{parent}/{m['label']}"
+    # Still the same (client/src/lib vs server/src/lib): the whole path tells them apart
+    counts = Counter(m["label"] for m in modules)
+    for m in modules:
+        if counts[m["label"]] > 1 and m["key"] and "/" in m["key"].rstrip("/") and not m["key"].endswith(".py"):
+            m["label"] = m["key"].rstrip("/")
     seen = Counter()
     for m in modules:
         seen[m["label"]] += 1
@@ -228,7 +253,7 @@ def build_architecture(graph: dict) -> dict:
             by_file[f]["functions"] += 1
         elif n.get("type") == "class":
             by_file[f]["classes"] += 1
-        if n.get("is_entry_point") and n.get("type") != "file":
+        if n.get("is_entry_point"):  # file nodes count too (JS/TS entry files)
             by_file[f]["entry"] = True
     module_of = {}
     out_modules = []

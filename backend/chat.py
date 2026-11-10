@@ -65,12 +65,40 @@ def _first_sentence(text: str, limit: int = MAX_ABOUT_CHARS) -> str:
     return sentence
 
 
+# Keyword a definition is introduced with, per language (functions); types use their kind
+FUNCTION_WORDS = {
+    "python": "def", "ruby": "def", "scala": "def", "javascript": "function", "typescript": "function",
+    "php": "function", "lua": "function", "go": "func", "swift": "func", "rust": "fn", "kotlin": "fun",
+}
+TYPE_WORDS = {"class", "interface", "struct", "module"}
+
+
+def _definition_word(node: dict) -> str:
+    """"def" / "function" / "func" / "fn" / "class" / "struct"… for one function or class node."""
+    lang = node.get("lang", "python")
+    if node.get("type") == "function":
+        return FUNCTION_WORDS.get(lang, "function")
+    kind = node.get("kind", "class")
+    if lang == "rust" and kind == "interface":
+        return "trait"
+    return kind if kind in TYPE_WORDS else "class"
+
+
+def _languages_line(graph: dict) -> str:
+    langs = graph.get("languages") or []
+    if not langs:
+        return ""
+    parts = [f"{row.get('label') or row['lang']} ({row['files']} {'file' if row['files'] == 1 else 'files'})" for row in langs]
+    return "Languages: " + ", ".join(parts) + "\n"
+
+
 def build_system_prompt(job_id: str, graph: dict) -> str:
     """
     Builds the grounding context from graph data.
     This is injected as the system message. Kept under MAX_PROMPT_CHARS.
     """
     repo = graph.get("repo", "unknown/repo")
+    languages_line = _languages_line(graph)
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
     degrees = _node_degrees(edges)
@@ -89,14 +117,15 @@ def build_system_prompt(job_id: str, graph: dict) -> str:
         )
         child_items = []
         for c in children[:MAX_CHILDREN_PER_FILE]:
-            prefix = "def" if c["type"] == "function" else "class"
+            prefix = "def" if c["type"] == "function" else "class"  # trimming category
+            word = _definition_word(c)
             if c.get("summary"):
                 tail = f" — {c['summary']}"
             elif c["type"] == "class" and c.get("doc"):
                 tail = f" — {_first_sentence(c['doc'])}"
             else:
                 tail = ""
-            child_items.append((prefix, degrees[c["id"]], f"    {prefix} {c.get('qualified_name') or c['label']}{tail}"))
+            child_items.append((prefix, degrees[c["id"]], f"    {word} {c.get('qualified_name') or c['label']}{tail}"))
         files.append({
             "path": path,
             "about": _first_sentence(fn.get("doc", "")),
@@ -152,7 +181,7 @@ def build_system_prompt(job_id: str, graph: dict) -> str:
             structure += f"\n  ...and {omitted} more files (omitted for length)"
         return f"""You are an expert software engineer helping a developer understand
 the codebase of the GitHub repository: {repo}
-
+{languages_line}
 You have been given a structured analysis of this repository including its
 files, their most-connected functions and classes, and key relationships.
 
@@ -171,21 +200,23 @@ RULES — follow these exactly:
 2. Name algorithms and protocols exactly as the file documentation ("about:") states
    (e.g. Bully, Chang–Roberts, Ricart–Agrawala, Chandy–Lamport). Never guess an
    algorithm from a filename. If the structure doesn't say, say you're not sure.
-3. When answering, cite specific node ids like `src/auth.py::verify_token`
+3. Use the terminology of the repo's language (for example method, struct, trait,
+   interface, module, package) rather than Python terms for non-Python code.
+4. When answering, cite specific node ids like `src/auth.py::verify_token`
    — wrap them in backticks. The frontend will make them clickable.
-4. If you're unsure which file handles something, say so and suggest
+5. If you're unsure which file handles something, say so and suggest
    the most likely candidates based on the structure.
-5. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
-6. If asked for code, you may quote short snippets but remind the user
+6. Keep answers concise — 3-6 sentences unless a longer explanation is needed.
+7. If asked for code, you may quote short snippets but remind the user
    to check the Code Inspector for the full implementation.
-7. End every answer with a "References:" section listing the node ids
+8. End every answer with a "References:" section listing the node ids
    you explicitly mentioned, one per line, prefixed with NODE:
    Example:
    References:
    NODE: src/auth.py::verify_token
    NODE: src/auth.py::TokenVerifier
    The frontend parses these to highlight nodes on the graph.
-8. If the question is about a process, flow or sequence ("how does X work",
+9. If the question is about a process, flow or sequence ("how does X work",
    "what happens when", "flow of"), then after the prose answer and before
    References output ONE fenced block like this, with 3-10 nodes:
    ```diagram

@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Code2, MousePointerClick, Search, Zap } from 'lucide-react';
 import { cn } from '../../lib/cn';
+import { langOf, languageName } from '../../lib/languages';
 import { Button, focusRing } from '../../ui';
 
 export const TYPE_LABEL = { file: 'File', function: 'Function', class: 'Class' };
+const KIND_LABEL = { method: 'Method', interface: 'Interface', struct: 'Struct', module: 'Module' };
 export const TYPE_DOT = {
   file: 'bg-cg-node-file',
   function: 'bg-cg-node-function',
@@ -121,8 +123,9 @@ export default function NodeDetails({ node, graph, onSelectNode, onViewSource, o
         <h2 className="break-words text-cg-lg font-semibold text-cg-text">{node.label}</h2>
         <p className="mt-1 flex items-center gap-1.5 text-cg-xs text-cg-secondary">
           <span aria-hidden="true" className={cn('h-2 w-2 rounded-full', TYPE_DOT[typeKey(node)])} />
-          {TYPE_LABEL[node.type] ?? node.type}
-          {node.is_entry_point && !isFile && <span className="text-cg-tertiary">· entry point</span>}
+          {KIND_LABEL[node.kind] ?? TYPE_LABEL[node.type] ?? node.type}
+          {langOf(node) && <span className="text-cg-tertiary">· {languageName(langOf(node))}</span>}
+          {node.is_entry_point && <span className="text-cg-tertiary">· entry point</span>}
         </p>
         <button
           type="button"

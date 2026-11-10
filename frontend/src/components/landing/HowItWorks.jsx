@@ -80,7 +80,7 @@ function AskArtefact() {
 const STEPS = [
   {
     title: 'Parse',
-    body: 'Every Python file is parsed into an AST with tree-sitter.',
+    body: 'Every source file is parsed into an AST with tree-sitter.',
     artefact: <CodeArtefact />,
   },
   {

@@ -1,3 +1,4 @@
+import { langOf, languageName, languageTag } from '../lib/languages';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronsDownUp, File, Folder, FolderOpen, Search, X, Zap, Crosshair } from 'lucide-react';
 import { cn } from '../lib/cn';
@@ -309,6 +310,16 @@ export default function FileTree({
                   <span className="min-w-0 truncate">{row.name}</span>
                   {clusterColor && (
                     <span aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: clusterColor }} />
+                  )}
+                  {row.kind === 'file' && langOf(row.node) && (
+                    // Visual only (pseudo-element): the extension already names the language, so the
+                    // tree item's accessible name stays the file name
+                    <span
+                      aria-hidden="true"
+                      data-tag={languageTag(langOf(row.node))}
+                      title={languageName(langOf(row.node))}
+                      className="ml-auto shrink-0 text-cg-xs text-cg-tertiary after:content-[attr(data-tag)]"
+                    />
                   )}
                   {row.kind === 'symbol' && row.node.lines?.[0] && (
                     <span className="ml-auto shrink-0 text-cg-xs tabular-nums text-cg-tertiary">{row.node.lines[0]}</span>

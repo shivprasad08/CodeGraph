@@ -4,10 +4,52 @@ import python from 'highlight.js/lib/languages/python';
 import { ExternalLink, FileCode2, X } from 'lucide-react';
 import { API_ERROR, fetchFileSource } from '../api';
 import { cn } from '../lib/cn';
+import { LANGUAGES, langOf } from '../lib/languages';
 import { IconButton } from '../ui';
 import { InlineError } from './app/RecoveryStatus';
 
 hljs.registerLanguage('python', python);
+
+// Other grammars load on first use, so they stay out of the main bundle
+const HLJS_LOADERS = {
+  javascript: () => import('highlight.js/lib/languages/javascript'),
+  typescript: () => import('highlight.js/lib/languages/typescript'),
+  java: () => import('highlight.js/lib/languages/java'),
+  go: () => import('highlight.js/lib/languages/go'),
+  rust: () => import('highlight.js/lib/languages/rust'),
+  c: () => import('highlight.js/lib/languages/c'),
+  cpp: () => import('highlight.js/lib/languages/cpp'),
+  csharp: () => import('highlight.js/lib/languages/csharp'),
+  ruby: () => import('highlight.js/lib/languages/ruby'),
+  php: () => import('highlight.js/lib/languages/php'),
+  kotlin: () => import('highlight.js/lib/languages/kotlin'),
+  swift: () => import('highlight.js/lib/languages/swift'),
+  scala: () => import('highlight.js/lib/languages/scala'),
+  lua: () => import('highlight.js/lib/languages/lua'),
+};
+
+const escapeHtml = (text) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** highlight.js language id for a file, registering its grammar on demand; null while it loads. */
+function useHighlightLanguage(lang) {
+  const id = LANGUAGES[lang]?.hljs ?? 'python';
+  const [, setLoaded] = useState(0);
+  const ready = Boolean(hljs.getLanguage(id));
+  useEffect(() => {
+    if (ready || !HLJS_LOADERS[id]) return undefined;
+    let alive = true;
+    HLJS_LOADERS[id]()
+      .then((mod) => {
+        if (!hljs.getLanguage(id)) hljs.registerLanguage(id, mod.default);
+        if (alive) setLoaded((n) => n + 1);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [id, ready]);
+  return ready ? id : null;
+}
 
 const LINE_HEIGHT = 21;
 // Minimap marks use the data palette (definitions, classes, imports)
@@ -95,6 +137,8 @@ export default function CodeInspector({
 
   // Graph cross-referencing
   const fileNodes = useMemo(() => graph?.nodes.filter((n) => n.file === filePath) || [], [graph, filePath]);
+  const fileLang = langOf(fileNodes.find((n) => n.type === 'file') ?? { id: filePath ?? '' });
+  const hlLanguage = useHighlightLanguage(fileLang);
   const fileEdges = useMemo(
     () =>
       graph?.edges.filter((e) => {
@@ -128,7 +172,8 @@ export default function CodeInspector({
 
   const renderedLines = useMemo(() => {
     if (!sourceCode) return [];
-    const lines = hljs.highlight(sourceCode, { language: 'python' }).value.split('\n');
+    const html = hlLanguage ? hljs.highlight(sourceCode, { language: hlLanguage }).value : escapeHtml(sourceCode);
+    const lines = html.split('\n');
 
     // Calls made from each definition, shown on its def line
     const callSitesByLine = {};
@@ -171,7 +216,7 @@ export default function CodeInspector({
         isClassDef: fileNodes.some((n) => n.type === 'class' && n.lines && n.lines[0] === lineNum),
       };
     });
-  }, [sourceCode, fileNodes, fileEdges, highlightedRanges, focusLine]);
+  }, [sourceCode, fileNodes, fileEdges, highlightedRanges, focusLine, hlLanguage]);
 
   const syncScroll = (e) => {
     if (e.target === codeRef.current && lineNumbersRef.current) lineNumbersRef.current.scrollTop = e.target.scrollTop;

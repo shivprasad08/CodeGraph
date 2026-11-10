@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { TriangleAlert, X } from 'lucide-react';
+import { FileX, TriangleAlert, X } from 'lucide-react';
 import { analyzeRepo, fetchAnalysis, fetchGraph, fetchRepo, subscribeToJob } from '../api';
 import { buildDirectoryColorMap } from '../utils/directoryColors';
 import { isPlainKey, isTypingTarget } from '../lib/hotkeys';
@@ -92,6 +92,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [jobStatus, setJobStatus] = useState(offline ? 'done' : null);
   const [error, setError] = useState(null);
+  const [errorCode, setErrorCode] = useState(null); // "no_source", "file_limit"… from the job stream
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState('queued');
   const [message, setMessage] = useState('Queued');
@@ -123,8 +124,9 @@ export default function ShareableGraphView({ staticData = null } = {}) {
           setStage(data.stage);
           setMessage(data.message);
         },
-        (errMsg) => {
+        (errMsg, code) => {
           setError(errMsg);
+          setErrorCode(code ?? null);
           setJobStatus('error');
         },
         async () => {
@@ -428,6 +430,20 @@ export default function ShareableGraphView({ staticData = null } = {}) {
     </span>
   );
 
+  if (error && errorCode === 'no_source') {
+    return (
+      <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
+        <TopBarFrame repoLabel={repoCrumb} />
+        <CenterMessage
+          icon={<FileX size={24} strokeWidth={1.5} aria-hidden="true" className="mx-auto text-cg-tertiary" />}
+          title={`No source files CodeGraph can read in ${owner}/${repo}`}
+          body={String(error)}
+          actions={<Button variant="primary" onClick={() => navigate('/')}>Analyze another repo</Button>}
+        />
+      </div>
+    );
+  }
+
   if (error) {
     return (
       <div className="flex h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text">
@@ -435,7 +451,7 @@ export default function ShareableGraphView({ staticData = null } = {}) {
         <CenterMessage
           icon={<TriangleAlert size={24} strokeWidth={1.5} aria-hidden="true" className="mx-auto text-cg-tertiary" />}
           title={`Couldn't analyze ${owner}/${repo}`}
-          body={`${String(error).replace(/\.\s*$/, '')}. Check that the repository is public and has Python files, then try again.`}
+          body={`${String(error).replace(/\.\s*$/, '')}. Check that the repository is public and has source files in a supported language, then try again.`}
           actions={
             <>
               <Button variant="primary" onClick={() => window.location.reload()}>

@@ -17,6 +17,10 @@ RUN pip install --no-cache-dir --upgrade setuptools \
 
 COPY . .
 
+# Download every non-Python tree-sitter grammar into /app/.grammars now (fails the build
+# if any is missing); the server only reads that cache and never downloads per request
+RUN python scripts/fetch_grammars.py
+
 EXPOSE 8000
 
 # ADJUST "main:app" to your FastAPI entrypoint (e.g. app.main:app)

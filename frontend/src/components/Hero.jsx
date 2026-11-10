@@ -4,7 +4,7 @@ import { cn } from '../lib/cn';
 import { normalizeRepoInput, stripGitHubPrefix } from '../lib/repoInput';
 import { Button, Input, focusRing } from '../ui';
 
-export const EXAMPLE_REPOS = ['psf/requests', 'pallets/flask', 'encode/starlette', 'fastapi/fastapi'];
+export const EXAMPLE_REPOS = ['psf/requests', 'pallets/flask', 'encode/starlette', 'fastapi/fastapi', 'expressjs/express'];
 export const COLD_START_DELAY_MS = 4000;
 
 const INVALID_REPO = 'Enter a repository as owner/repo, for example psf/requests.';
@@ -70,7 +70,7 @@ export default function Hero({ onAnalyze, inputRef }) {
           id="hero-title"
           className="text-balance text-[36px] font-semibold leading-[40px] tracking-[-0.02em] text-cg-text sm:text-cg-display"
         >
-          See how a Python codebase fits together.
+          See how a codebase fits together.
         </h1>
         <p className="mt-5 max-w-[560px] text-cg-lg text-cg-secondary">
           Paste a GitHub repo. CodeGraph parses it with tree-sitter, maps every call and import, and lets you
@@ -135,7 +135,7 @@ export default function Hero({ onAnalyze, inputRef }) {
             </span>
           ))}
         </p>
-        <p className="mt-2 text-cg-sm text-cg-tertiary">Free · open source · Python repos up to 60 files</p>
+        <p className="mt-2 text-cg-sm text-cg-tertiary">Free · open source · repos up to 60 source files</p>
       </div>
     </section>
   );
