@@ -118,6 +118,35 @@ def test_allowed_origins_default_and_env(monkeypatch):
     assert importlib.reload(config).ALLOWED_ORIGINS == ["https://code-graph-ashy.vercel.app", "http://localhost:5173"]
 
 
+def test_allowed_origins_parsing_is_forgiving(monkeypatch):
+    import importlib
+
+    import config
+    monkeypatch.setenv("ALLOWED_ORIGINS", " https://code-graph-ashy.vercel.app/ ,http://localhost:5173")
+    assert importlib.reload(config).ALLOWED_ORIGINS == ["https://code-graph-ashy.vercel.app", "http://localhost:5173"]
+    assert config.parse_origins(" , / ,https://a.example//, https://a.example ,,") == ["https://a.example"]
+    monkeypatch.delenv("ALLOWED_ORIGINS")
+    importlib.reload(config)
+
+
+def test_startup_logs_origins_and_warns_on_render(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger="codegraph")
+    monkeypatch.delenv("RENDER", raising=False)
+    main._log_allowed_origins(["http://localhost:5173"])
+    assert "allowed origins: http://localhost:5173" in caplog.text
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    caplog.clear()
+    monkeypatch.setenv("RENDER", "true")
+    main._log_allowed_origins(["http://localhost:5173"])
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "https://code-graph-ashy.vercel.app" in warnings[0].getMessage()
+
+    caplog.clear()
+    main._log_allowed_origins(["https://code-graph-ashy.vercel.app", "http://localhost:5173"])
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
 # ---------------------------------------------------------------------------
 # 5. /analyze: 10 per hour per IP
 # ---------------------------------------------------------------------------

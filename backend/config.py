@@ -17,10 +17,21 @@ GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 
 # Browser origins allowed to call the API (CORS), comma-separated
-DEFAULT_ALLOWED_ORIGINS = "https://code-graph-ashy.vercel.app,http://localhost:5173"
-ALLOWED_ORIGINS = [
-    o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS).split(",") if o.strip()
-]
+PRODUCTION_ORIGIN = "https://code-graph-ashy.vercel.app"
+DEFAULT_ALLOWED_ORIGINS = f"{PRODUCTION_ORIGIN},http://localhost:5173"
+
+
+def parse_origins(raw: str) -> list[str]:
+    """Comma-separated origins -> list: whitespace and trailing slashes stripped, empty entries and duplicates dropped."""
+    origins = []
+    for entry in raw.split(","):
+        origin = entry.strip().rstrip("/").strip()
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
+
+
+ALLOWED_ORIGINS = parse_origins(os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS))
 # /analyze: analyses one IP may start per hour
 ANALYZE_LIMIT_PER_HOUR = int(os.getenv("ANALYZE_LIMIT_PER_HOUR", 10))
 # ADMIN_KEY (for /cache) is read per request, so it is not cached here

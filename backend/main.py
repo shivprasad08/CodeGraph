@@ -117,10 +117,21 @@ def _check_grammar_cache() -> None:
         logger.info(f"[languages] all {len(registry.GRAMMARS)} grammars cached in {registry.grammar_dir()}")
 
 
+def _log_allowed_origins(origins: list[str]) -> None:
+    """Origins are not secrets: log them, and warn if the deployed frontend is missing on Render."""
+    logger.info(f"[cors] allowed origins: {', '.join(origins) or '(none)'}")
+    if os.getenv("RENDER") and config.PRODUCTION_ORIGIN not in origins:
+        logger.warning(
+            f"[cors] ALLOWED_ORIGINS does not include {config.PRODUCTION_ORIGIN}; "
+            "the deployed frontend will be blocked by CORS."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.validate_config()
     _check_grammar_cache()
+    _log_allowed_origins(config.ALLOWED_ORIGINS)
     task = asyncio.create_task(_cleanup_old_jobs())
     yield
     task.cancel()
