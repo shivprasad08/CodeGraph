@@ -71,20 +71,26 @@ export function pickLabels(edges, wanted, active = new Set(), obstacles = []) {
   return shown;
 }
 
-/** Lays the spec out with dagre; returns positioned React Flow nodes and plain edge records. */
-export function layoutSpec(spec) {
-  const direction = spec.direction === 'LR' ? 'LR' : 'TB';
+const heightOf = (n) => (n.sublabel ? NODE_H : NODE_H_NO_SUB);
+
+// Group frames (multi-app repos): padding, label band, gap between frames
+export const GROUP_PAD = 16;
+export const GROUP_LABEL_H = 24;
+export const GROUP_GAP = 48;
+
+/**
+ * Positions for a set of nodes: dagre for linked nodes, a grid for unlinked ones (under the
+ * layout). `compact` lays fully unlinked sets out as a square-ish grid instead of 3+ wide.
+ */
+function placeNodes(nodes, edges, direction, { compact = false } = {}) {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: direction, ranksep: RANKSEP, nodesep: NODESEP, edgesep: EDGESEP, marginx: 16, marginy: 16 });
   g.setDefaultEdgeLabel(() => ({}));
-  const ids = new Set(spec.nodes.map((n) => n.id));
-  const edges = spec.edges.filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target);
   const linked = new Set(edges.flatMap((e) => [e.source, e.target]));
-  const heightOf = (n) => (n.sublabel ? NODE_H : NODE_H_NO_SUB);
 
   // Linked nodes go through dagre. Unlinked ones would all land in one very wide
   // rank, so they get a compact grid under the layout instead.
-  for (const n of spec.nodes) if (linked.has(n.id)) g.setNode(n.id, { width: NODE_W, height: heightOf(n) });
+  for (const n of nodes) if (linked.has(n.id)) g.setNode(n.id, { width: NODE_W, height: heightOf(n) });
   for (const e of edges) g.setEdge(e.source, e.target);
   dagre.layout(g);
 
@@ -100,18 +106,79 @@ export function layoutSpec(spec) {
     maxX = Math.max(maxX, pos.x + p.width);
     maxY = Math.max(maxY, pos.y + p.height);
   }
-  const loose = spec.nodes.filter((n) => !linked.has(n.id));
+  const loose = nodes.filter((n) => !linked.has(n.id));
   if (loose.length) {
     const startX = linked.size ? minX : 0;
     const startY = linked.size ? maxY + RANKSEP * 1.5 : 0;
     const fitCols = linked.size ? Math.floor((maxX - minX + NODESEP) / (NODE_W + NODESEP)) : 0;
-    const cols = Math.max(3, Math.min(loose.length, fitCols || Math.ceil(Math.sqrt(loose.length))));
+    const square = Math.ceil(Math.sqrt(loose.length));
+    const cols = compact && !linked.size ? square : Math.max(3, Math.min(loose.length, fitCols || square));
     loose.forEach((n, i) => {
       positions.set(n.id, {
         x: startX + (i % cols) * (NODE_W + NODESEP),
         y: startY + Math.floor(i / cols) * (NODE_H + NODESEP),
       });
     });
+  }
+  return positions;
+}
+
+const boxOf = (nodes, positions) =>
+  nodes.reduce(
+    (b, n) => {
+      const p = positions.get(n.id);
+      return {
+        x1: Math.min(b.x1, p.x),
+        y1: Math.min(b.y1, p.y),
+        x2: Math.max(b.x2, p.x + NODE_W),
+        y2: Math.max(b.y2, p.y + heightOf(n)),
+      };
+    },
+    { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity },
+  );
+
+/**
+ * Lays the spec out with dagre; returns positioned React Flow nodes and plain edge records.
+ * With spec.groups (and node.group), each group is laid out on its own inside a frame
+ * node (React Flow subflow) and frames sit left to right; ungrouped nodes come last.
+ */
+export function layoutSpec(spec) {
+  const direction = spec.direction === 'LR' ? 'LR' : 'TB';
+  const ids = new Set(spec.nodes.map((n) => n.id));
+  const edges = spec.edges.filter((e) => ids.has(e.source) && ids.has(e.target) && e.source !== e.target);
+
+  // Absolute positions of every module node, and frames for groups
+  let positions;
+  const frames = []; // {id, label, x, y, width, height}
+  const parentOf = new Map();
+  const groups = (spec.groups ?? []).filter((grp) => spec.nodes.some((n) => n.group === grp.id));
+  if (!groups.length) {
+    positions = placeNodes(spec.nodes, edges, direction);
+  } else {
+    positions = new Map();
+    const blocks = groups.map((grp) => ({ grp, nodes: spec.nodes.filter((n) => n.group === grp.id) }));
+    const known = new Set(groups.map((grp) => grp.id));
+    const ungrouped = spec.nodes.filter((n) => !known.has(n.group));
+    if (ungrouped.length) blocks.push({ grp: null, nodes: ungrouped });
+    let x = 0;
+    for (const { grp, nodes } of blocks) {
+      const members = new Set(nodes.map((n) => n.id));
+      const inner = edges.filter((e) => members.has(e.source) && members.has(e.target));
+      const local = placeNodes(nodes, inner, direction, { compact: true });
+      const box = boxOf(nodes, local);
+      const offsetX = x + (grp ? GROUP_PAD : 0) - box.x1;
+      const offsetY = GROUP_LABEL_H + GROUP_PAD - box.y1;
+      for (const n of nodes) {
+        const p = local.get(n.id);
+        positions.set(n.id, { x: p.x + offsetX, y: p.y + offsetY });
+        if (grp) parentOf.set(n.id, grp.id);
+      }
+      const width = box.x2 - box.x1 + (grp ? GROUP_PAD * 2 : 0);
+      if (grp) {
+        frames.push({ id: grp.id, label: grp.label, x, y: 0, width, height: box.y2 - box.y1 + GROUP_LABEL_H + GROUP_PAD * 2 });
+      }
+      x += width + GROUP_GAP;
+    }
   }
 
   const vertical = direction === 'TB';
@@ -135,36 +202,58 @@ export function layoutSpec(spec) {
   // Cluster dots: one palette slot per distinct cluster, same palette and assignment as the graph view
   const clusterKeys = [...new Set(spec.nodes.map((n) => n.cluster).filter(Boolean))];
 
-  // The first view frames every node
-  const focus = spec.nodes;
-  const box = focus.reduce(
-    (b, n) => {
-      const p = positions.get(n.id);
-      return {
-        x1: Math.min(b.x1, p.x),
-        y1: Math.min(b.y1, p.y),
-        x2: Math.max(b.x2, p.x + NODE_W),
-        y2: Math.max(b.y2, p.y + heightOf(n)),
-      };
-    },
-    { x1: Infinity, y1: Infinity, x2: -Infinity, y2: -Infinity },
-  );
+  // The first view frames every node (and every group frame)
+  const box = boxOf(spec.nodes, positions);
+  for (const f of frames) {
+    box.x1 = Math.min(box.x1, f.x);
+    box.y1 = Math.min(box.y1, f.y);
+    box.x2 = Math.max(box.x2, f.x + f.width);
+    box.y2 = Math.max(box.y2, f.y + f.height);
+  }
+  const frameById = new Map(frames.map((f) => [f.id, f]));
+  // Absolute boxes of module nodes (label collision; React Flow positions children relative to the frame)
+  const abs = new Map(spec.nodes.map((n) => {
+    const p = positions.get(n.id);
+    return [n.id, { x1: p.x, y1: p.y, x2: p.x + NODE_W, y2: p.y + heightOf(n) }];
+  }));
+
   return {
-    focusBox: focus.length ? box : null,
-    nodes: spec.nodes.map((n) => ({
-      id: n.id,
-      type: 'cg',
-      position: positions.get(n.id),
-      width: NODE_W,
-      height: heightOf(n),
-      ariaLabel: [n.label, n.sublabel].filter(Boolean).join(', '),
-      data: {
-        ...n,
-        vertical,
-        color: n.cluster ? getDirectoryColor(n.cluster, clusterKeys).token : null,
-        clickable: Boolean(n.nodeRef || n.members),
-      },
-    })),
+    focusBox: spec.nodes.length ? box : null,
+    abs,
+    nodes: [
+      // Parents must come before their children
+      ...frames.map((f) => ({
+        id: f.id,
+        type: 'cgGroup',
+        position: { x: f.x, y: f.y },
+        width: f.width,
+        height: f.height,
+        selectable: false,
+        focusable: false,
+        draggable: false,
+        ariaLabel: `${f.label} group`,
+        data: { label: f.label, isGroup: true },
+      })),
+      ...spec.nodes.map((n) => {
+        const p = positions.get(n.id);
+        const parent = frameById.get(parentOf.get(n.id));
+        return {
+          id: n.id,
+          type: 'cg',
+          position: parent ? { x: p.x - parent.x, y: p.y - parent.y } : p,
+          ...(parent ? { parentId: parent.id } : {}),
+          width: NODE_W,
+          height: heightOf(n),
+          ariaLabel: [n.label, n.sublabel].filter(Boolean).join(', '),
+          data: {
+            ...n,
+            vertical,
+            color: n.cluster ? getDirectoryColor(n.cluster, clusterKeys).token : null,
+            clickable: Boolean(n.nodeRef || n.members),
+          },
+        };
+      }),
+    ],
     edges: edges.map((e, i) => {
       const back = isBack(e);
       const s = anchor(e.source, !back);
@@ -212,11 +301,15 @@ export function decorate(layout, { activeNodeId = null, activeEdgeId = null, tok
   const litNodes = new Set(activeNodeId ? [activeNodeId] : []);
   for (const e of layout.edges) if (active.has(e.id)) litNodes.add(e.source).add(e.target);
 
-  const nodeBoxes = layout.nodes.map((n) => ({ x1: n.position.x, y1: n.position.y, x2: n.position.x + n.width, y2: n.position.y + n.height }));
+  const nodeBoxes = layout.abs
+    ? [...layout.abs.values()]
+    : layout.nodes.map((n) => ({ x1: n.position.x, y1: n.position.y, x2: n.position.x + n.width, y2: n.position.y + n.height }));
   const shown = pickLabels(layout.edges, new Set([...top, ...active]), active, nodeBoxes);
 
   return {
-    nodes: layout.nodes.map((n) => ({ ...n, className: cn(focusOn && !litNodes.has(n.id) && 'cg-flow-dim') || undefined })),
+    nodes: layout.nodes.map((n) =>
+      n.data?.isGroup ? n : { ...n, className: cn(focusOn && !litNodes.has(n.id) && 'cg-flow-dim') || undefined },
+    ),
     edges: layout.edges.map((e) => {
       const on = active.has(e.id);
       const width = Math.round((on ? 1.5 + norm(e.weight) : 1 + 2 * norm(e.weight)) * 100) / 100;
@@ -276,7 +369,16 @@ function DiagramNode({ data }) {
   );
 }
 
-const NODE_TYPES = { cg: DiagramNode };
+/** Frame around one app's modules (multi-app repos). Not interactive: hover/click pass through. */
+function DiagramGroup({ data }) {
+  return (
+    <div className="relative h-full w-full rounded-cg-panel border border-dashed border-cg-border-strong">
+      <span className="absolute left-3 top-1.5 max-w-[calc(100%-24px)] truncate text-cg-xs text-cg-tertiary">{data.label}</span>
+    </div>
+  );
+}
+
+const NODE_TYPES = { cg: DiagramNode, cgGroup: DiagramGroup };
 
 const MAX_FIT_ZOOM = 1.25;
 export const FIT_PADDING = 0.15; // share of the content size, as React Flow's fitView padding
@@ -413,12 +515,13 @@ function FlowDiagramInner({ spec, onNodeClick, height = 320, wheelZoom = false, 
         zoomOnPinch
         zoomOnDoubleClick={false}
         panOnDrag
-        onNodeMouseEnter={(_, node) => setHoverNode(node.id)}
+        onNodeMouseEnter={(_, node) => node.type !== 'cgGroup' && setHoverNode(node.id)}
         onNodeMouseLeave={() => setHoverNode(null)}
         onEdgeMouseEnter={(_, edge) => setHoverEdge(edge.id)}
         onEdgeMouseLeave={() => setHoverEdge(null)}
         onPaneClick={() => setSelected(null)}
         onNodeClick={(_, node) => {
+          if (node.type === 'cgGroup') return;
           setSelected(node.id);
           activate(node.id);
         }}

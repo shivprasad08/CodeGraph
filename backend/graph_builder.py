@@ -19,7 +19,7 @@ import networkx as nx
 from generic_resolver import GenericLinker
 
 # Bump when node ids or edge semantics change; part of the cache key so old graphs are not reused
-GRAPH_SCHEMA_VERSION = 4
+GRAPH_SCHEMA_VERSION = 6
 
 # Method names too common to infer from an unknown receiver (dict.get, list.append, file.close…)
 GENERIC_METHOD_STOPLIST = frozenset({

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { ALWAYS_LABELLED, FIT_PADDING, LABEL_GAP, decorate, fitZoom, labelBox, layoutSpec, pickLabels } from '../FlowDiagram';
+import {
+  ALWAYS_LABELLED,
+  FIT_PADDING,
+  GROUP_GAP,
+  GROUP_LABEL_H,
+  GROUP_PAD,
+  LABEL_GAP,
+  decorate,
+  fitZoom,
+  labelBox,
+  layoutSpec,
+  pickLabels,
+} from '../FlowDiagram';
 
 const tokens = { borderStrong: '#555', canvas: '#000', text: '#fff', secondary: '#aaa', tertiary: '#888' };
 const spec = {
@@ -190,5 +202,69 @@ describe('hover / selection', () => {
     const cd = layout.edges.find((e) => e.source === 'c').id;
     const { nodes } = decorate(layout, { tokens, activeEdgeId: cd });
     expect(nodes.filter((n) => !n.className).map((n) => n.id)).toEqual(['c', 'd']);
+  });
+});
+
+describe('groups (multi-app repos)', () => {
+  const grouped = {
+    direction: 'TB',
+    groups: [{ id: 'grp:client', label: 'client/src' }, { id: 'grp:services', label: 'services' }],
+    nodes: [
+      { id: 'c1', label: 'components', group: 'grp:client' },
+      { id: 'c2', label: 'lib', group: 'grp:client' },
+      { id: 's1', label: 'submit', group: 'grp:services' },
+      { id: 's2', label: 'worker', group: 'grp:services' },
+      { id: 's3', label: 'ws', group: 'grp:services' },
+      { id: 's4', label: 'shared', group: 'grp:services' },
+      { id: 'top', label: 'server/src' },
+    ],
+    edges: [
+      { source: 'c1', target: 'c2', weight: 3, label: '3 calls' },
+      { source: 'c2', target: 'top', weight: 2, label: '2 calls' }, // crosses groups
+    ],
+  };
+  const layout = layoutSpec(grouped);
+  const node = (id) => layout.nodes.find((n) => n.id === id);
+
+  it('renders each group as a frame before its children, children positioned relative to it', () => {
+    const ids = layout.nodes.map((n) => n.id);
+    expect(ids.slice(0, 2)).toEqual(['grp:client', 'grp:services']);
+    expect(node('grp:client').type).toBe('cgGroup');
+    expect(node('grp:client').data.label).toBe('client/src');
+    expect(node('c1').parentId).toBe('grp:client');
+    expect(node('top').parentId).toBeUndefined();
+    for (const id of ['c1', 'c2', 's1', 's2', 's3', 's4']) {
+      const child = node(id);
+      const frame = node(child.parentId);
+      expect(child.position.x).toBeGreaterThanOrEqual(GROUP_PAD);
+      expect(child.position.y).toBeGreaterThanOrEqual(GROUP_LABEL_H);
+      expect(child.position.x + child.width).toBeLessThanOrEqual(frame.width);
+      expect(child.position.y + child.height).toBeLessThanOrEqual(frame.height);
+    }
+  });
+
+  it('places frames left to right without overlap; ungrouped modules come after them', () => {
+    const client = node('grp:client');
+    const services = node('grp:services');
+    expect(services.position.x).toBeGreaterThanOrEqual(client.position.x + client.width + GROUP_GAP);
+    expect(layout.abs.get('top').x1).toBeGreaterThanOrEqual(services.position.x + services.width);
+    expect(layout.focusBox.x2).toBeGreaterThanOrEqual(layout.abs.get('top').x2);
+  });
+
+  it('lays a group without links out as a compact grid', () => {
+    const xs = new Set(['s1', 's2', 's3', 's4'].map((id) => layout.abs.get(id).x1));
+    const ys = new Set(['s1', 's2', 's3', 's4'].map((id) => layout.abs.get(id).y1));
+    expect([xs.size, ys.size]).toEqual([2, 2]); // 4 modules → 2 × 2
+  });
+
+  it('keeps edges between groups and never dims a frame', () => {
+    expect(layout.edges.map((e) => `${e.source}→${e.target}`)).toEqual(['c1→c2', 'c2→top']);
+    const { nodes } = decorate(layout, { tokens, activeNodeId: 's1' });
+    expect(nodes.find((n) => n.id === 'grp:client').className).toBeUndefined();
+    expect(nodes.find((n) => n.id === 'c1').className).toContain('cg-flow-dim');
+  });
+
+  it('a spec without groups has no frames (unchanged layout)', () => {
+    expect(layoutSpec(spec).nodes.some((n) => n.type === 'cgGroup')).toBe(false);
   });
 });

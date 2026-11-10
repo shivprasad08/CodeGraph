@@ -12,7 +12,7 @@ const idOf = (end) => (typeof end === 'object' && end !== null ? end.id : end);
 export const METHOD_LABEL = {
   directories: 'Grouped by directory',
   communities: 'Grouped by call and import communities',
-  hybrid: 'Grouped by directory, largest directory split by calls',
+  hybrid: 'Grouped by folder; files outside folders grouped by calls',
 };
 
 /**
@@ -24,7 +24,7 @@ export const METHOD_LABEL = {
 export function buildArchitecture(graph, { includeHidden = false } = {}) {
   const arch = graph?.architecture;
   if (!arch || !Array.isArray(arch.modules)) {
-    return { direction: 'TB', nodes: [], edges: [], hiddenCount: 0, method: null, missing: true };
+    return { direction: 'TB', nodes: [], edges: [], groups: [], hiddenCount: 0, method: null, missing: true };
   }
   const nodes = graph.nodes ?? [];
   const hidden = arch.hidden ?? [];
@@ -72,6 +72,8 @@ export function buildArchitecture(graph, { includeHidden = false } = {}) {
     direction: 'TB',
     method: arch.method ?? null,
     missing: false,
+    // Multi-app repos: containers drawn as frames around their modules (node.group)
+    groups: (arch.groups ?? []).map((g) => ({ id: g.id, label: g.label })),
     hiddenCount: hidden.length,
     nodes: modules.map((m) => {
       const main = mainFile(m.files);
@@ -84,6 +86,7 @@ export function buildArchitecture(graph, { includeHidden = false } = {}) {
         cluster: main,
         members: m.files,
         entry: m.has_entry_points,
+        group: m.parent ?? null,
       };
     }),
     edges: edges.map((e) => ({

@@ -60,3 +60,7 @@
     transition: none;
   }
 }
+/* Group frames (multi-app repos) only outline their modules: pans and hovers pass through */
+.cg-flow .react-flow__node-cgGroup {
+  pointer-events: none;
+}
