@@ -181,7 +181,8 @@ describe('/demo app view', () => {
     expect(activeTab()).toBe('Details');
     await act(async () => press('3'));
     expect(activeTab()).toBe('Health');
-    expect(screen.getByText(/80/)).toBeTruthy(); // re-scored demo health
+    // The demo file's own health score (it changes whenever the demo is regenerated)
+    expect(screen.getAllByText(String(demoFile.analysis.score)).length).toBeGreaterThan(0);
     await act(async () => press('2'));
     expect(activeTab()).toBe('Chat');
     expect(screen.getByText('Chat is available on your own analyses')).toBeTruthy();
