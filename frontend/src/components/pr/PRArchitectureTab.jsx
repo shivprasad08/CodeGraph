@@ -11,7 +11,8 @@ export function prArchitectureSpec(result) {
   if (!head?.modules?.length) return null;
   const spec = buildArchitecture({ nodes: result.subgraph?.nodes ?? [], architecture: head });
   if (spec.missing) return null;
-  const affected = new Map(result.modules.map((m) => [m.label, m]));
+  // Modules with code changes or impacted code (docs-only modules stay faded)
+  const affected = new Map(result.modules.filter((m) => m.changed || m.impacted).map((m) => [m.label, m]));
   const idOf = new Map(head.modules.map((m) => [m.label, m.id]));
   const nodes = spec.nodes.map((n) => {
     const hit = affected.get(n.label);
@@ -47,7 +48,7 @@ export default function PRArchitectureTab({ result }) {
     <div className="flex h-full min-h-[420px] flex-col gap-2">
       <DiagramFrame className="min-h-[360px] flex-1" spec={spec} title="Architecture affected by this PR" height="100%" wheelZoom />
       <p className="text-cg-xs text-cg-tertiary">
-        Outlined: modules with changed or impacted code ({result.modules.length}).{' '}
+        Outlined: modules with changed or impacted code ({result.modules.filter((m) => m.changed || m.impacted).length}).{' '}
         {newEdges.length
           ? `Dashed: ${newEdges.length} module dependenc${newEdges.length === 1 ? 'y' : 'ies'} new in this PR.`
           : 'No new dependencies between modules.'}

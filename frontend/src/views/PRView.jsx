@@ -262,6 +262,7 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
   }
 
   const { pr, risk, summary } = result;
+  const quiet = (result.stats.docs ?? 0) + (result.stats.format ?? 0);
   return (
     <div className="flex min-h-dvh flex-col bg-cg-canvas font-cg-sans text-cg-text lg:h-dvh">
       <TopBarFrame repoLabel={crumb}>{actions}</TopBarFrame>
@@ -284,8 +285,9 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
           <RiskCard risk={risk} />
           <SummaryBlock summary={summary} />
           <p className="text-cg-xs text-cg-tertiary">
-            {result.stats.changed} changed · {result.stats.impacted} depend on them · {result.modules.length} module
-            {result.modules.length === 1 ? '' : 's'} · {result.stats.files} file{result.stats.files === 1 ? '' : 's'} in the PR
+            {result.stats.changed} code change{result.stats.changed === 1 ? '' : 's'}
+            {quiet > 0 && ` · ${quiet} docs or format only`} · {result.stats.impacted} depend on them ·{' '}
+            {result.stats.files} file{result.stats.files === 1 ? '' : 's'} in the PR
           </p>
         </aside>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col px-4 pb-4 sm:px-6 lg:px-4">

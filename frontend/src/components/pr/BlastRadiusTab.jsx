@@ -7,7 +7,7 @@ import { cn } from '../../lib/cn';
 import { Spinner, focusRing } from '../../ui';
 import SegmentedControl from '../../ui/SegmentedControl';
 import GraphCanvas from '../GraphCanvas';
-import { CHANGE_KIND, EmptyChanges } from './ChangesTab';
+import { CHANGE_KIND, EmptyChanges, isCodeChange } from './ChangesTab';
 
 // Literal class names (Tailwind only generates classes it can see in the source)
 const RING = { added: 'border-cg-success', modified: 'border-cg-sev-med', removed: 'border-cg-sev-high' };
@@ -116,6 +116,14 @@ export default function BlastRadiusTab({ result, jobId, selectedId, onSelect, on
   const impacted = result.impacted.filter((i) => i.depth <= maxDepth);
 
   if (!result.changes.length) return <EmptyChanges onShowFiles={onShowFiles} />;
+  const codeChanges = result.changes.filter(isCodeChange);
+  if (!codeChanges.length) {
+    return (
+      <p className="px-2 py-10 text-center text-cg-sm text-cg-secondary">
+        This PR only changes documentation or formatting, so there is nothing to trace: no code that depends on it is affected.
+      </p>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-[420px] flex-col gap-3">
@@ -140,7 +148,7 @@ export default function BlastRadiusTab({ result, jobId, selectedId, onSelect, on
         {fullState === 'loading' && <Spinner label="Loading the full graph" />}
         {fullState === 'error' && <span className="text-cg-xs text-cg-secondary">The full graph couldn&apos;t be loaded.</span>}
         <p className="ml-auto text-cg-xs text-cg-tertiary">
-          {result.changes.length} changed · {impacted.length} impacted
+          {codeChanges.length} changed · {impacted.length} impacted
           {result.impacted_capped ? ' (first 500)' : ''}
         </p>
       </div>

@@ -10,7 +10,7 @@ import re
 
 import httpx
 
-from ingestion import RepoNotFoundError, _github_headers, repo_info
+from ingestion import HTTP_TIMEOUT, RepoNotFoundError, _github_headers, repo_info
 
 PR_URL_RE = re.compile(
     r"^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9-_.]+)/([A-Za-z0-9-_.]+)/pull/(\d+)"
@@ -39,7 +39,7 @@ def pr_url(owner: str, repo: str, number: int) -> str:
 
 
 async def _get_json(client: httpx.AsyncClient, url: str, params=None):
-    response = await client.get(url, params=params, timeout=15)
+    response = await client.get(url, params=params, timeout=HTTP_TIMEOUT)
     if response.status_code == 404:
         raise PRNotFoundError(url)
     if response.status_code != 200:
@@ -75,7 +75,7 @@ def _meta(owner: str, repo: str, number: int, pr: dict) -> dict:
 async def fetch_pr_meta(owner: str, repo: str, number: int, client: httpx.AsyncClient | None = None) -> dict:
     """PR metadata; checks that the base repo (and a fork's head repo) is public."""
     if client is None:
-        async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as own:
+        async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=HTTP_TIMEOUT) as own:
             return await fetch_pr_meta(owner, repo, number, own)
     await repo_info(owner, repo, client)  # RepoNotFoundError / RepoPrivateError
     pr = await _get_json(client, f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}")
@@ -115,7 +115,7 @@ async def fetch_pr_files(owner: str, repo: str, number: int, client: httpx.Async
 
 async def fetch_pr(owner: str, repo: str, number: int) -> dict:
     """{meta, files, truncated}."""
-    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as client:
+    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=HTTP_TIMEOUT) as client:
         meta = await fetch_pr_meta(owner, repo, number, client)
         files, truncated = await fetch_pr_files(owner, repo, number, client)
     return {"meta": meta, "files": files, "truncated": truncated}

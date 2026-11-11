@@ -294,7 +294,7 @@ def test_analyse_builds_a_complete_result():
     result = pr_impact.analyse(META, PR_FILES, base, HEAD)
     assert [c["qualified_name"] for c in result["changes"]] == ["Store.get"]
     assert [i["id"] for i in result["impacted"]] == ["app/a.py::helper"] and result["impacted"][0]["depth"] == 1
-    assert result["modules"] == [{"label": "core", "changed": 1, "impacted": 1}]
+    assert result["modules"] == [{"label": "core", "changed": 1, "impacted": 1, "docs": 0}]
     sub_ids = {n["id"] for n in result["subgraph"]["nodes"]}
     assert {"app/a.py::Store.get", "app/a.py::helper", "app/a.py"} <= sub_ids
     assert result["stats"]["changed"] == 1 and result["risk"]["level"] in ("low", "medium", "high")

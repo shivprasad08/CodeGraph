@@ -493,6 +493,32 @@ async def _ensure_analysis(owner: str, repo: str, sha: str, handle, stage: str, 
     return analysis_id, graph, False
 
 
+MAX_SOURCE_FILES = 80  # files fetched at each commit to tell code changes from docs/format ones
+
+
+async def _pr_sources(meta: dict, files: list[dict], base_graph: dict, head_graph: dict) -> dict:
+    """
+    {"base": {path: text}, "head": {path: text}} for the PR's modified/renamed source files in
+    the graphs. Best effort: a file that can't be fetched stays "modified" (never under-reported).
+    """
+    graph_files = lambda g: {n["id"] for n in g.get("nodes", []) if n.get("type") == "file"}  # noqa: E731
+    base_files, head_files = graph_files(base_graph), graph_files(head_graph)
+    edited = [f for f in files if f.get("status") in ("modified", "renamed", "changed")]
+    want_base = [p for p in ((f.get("previous_filename") or f["filename"]) for f in edited) if p in base_files][:MAX_SOURCE_FILES]
+    want_head = [f["filename"] for f in edited if f["filename"] in head_files][:MAX_SOURCE_FILES]
+    head_owner, head_repo = meta["head_repo"].split("/", 1)
+    try:
+        async with httpx.AsyncClient(headers=ingestion._github_headers(), follow_redirects=True, timeout=ingestion.HTTP_TIMEOUT) as client:
+            base_rows, head_rows = await asyncio.gather(
+                ingestion._fetch_file_contents(meta["owner"], meta["repo"], meta["base_sha"], [{"path": p} for p in want_base], client),
+                ingestion._fetch_file_contents(head_owner, head_repo, meta["head_sha"], [{"path": p} for p in want_head], client),
+            )
+    except Exception as e:
+        logger.warning(f"[pr] source fetch failed: {type(e).__name__}")
+        return {}
+    return {"base": {r["path"]: r["content"] for r in base_rows}, "head": {r["path"]: r["content"] for r in head_rows}}
+
+
 async def _pr_pipeline(job_id: str, handle, url: str):
     """(meta, base analysis id, head analysis id, result), or None when a stored result was reused."""
     owner, repo, number = github_pr.parse_pr_url(url)
@@ -517,7 +543,8 @@ async def _pr_pipeline(job_id: str, handle, url: str):
     head_id, head_graph, head_reused = await _ensure_analysis(head_owner, head_repo, meta["head_sha"], handle, "head", 45, 80, "Analyzing head")
 
     handle.set(stage="mapping", progress=82, message="Mapping changes")
-    result = pr_impact.analyse(meta, pr["files"], base_graph, head_graph, pr["truncated"])
+    sources = await _pr_sources(meta, pr["files"], base_graph, head_graph)
+    result = pr_impact.analyse(meta, pr["files"], base_graph, head_graph, pr["truncated"], sources)
     handle.set(stage="scoring", progress=88, message="Scoring")
     handle.set(stage="summary", progress=92, message="Summarizing")
     result = await pr_impact.summarise(result)
@@ -806,7 +833,7 @@ async def get_pr_graph(job_id: str, side: str, request: Request):
     row = await store.pr_row(job.get("pr_analysis_id"))
     analysis_id = row and row[f"{side}_analysis_id"]
     repo = row and (row["base_repo"] if side == "base" else row["head_repo_name"])
-    graph = analysis_id and await _graph_by_analysis(analysis_id, repo, row[f"{side}_sha"], row["schema_version"])
+    graph = analysis_id and await _graph_by_analysis(analysis_id, repo, row[f"{side}_sha"], row[f"{side}_schema"])
     if not graph:
         return JSONResponse(status_code=404, content={"error": "This graph is no longer stored", "detail": None})
     return JSONResponse(graph, headers={"Cache-Control": "private, max-age=3600"})
@@ -828,7 +855,7 @@ async def get_file_source(owner: str, repo: str, commit_sha: str, file_path: str
     if node is None:
         raise HTTPException(404, "File not found")
     url = f"https://raw.githubusercontent.com/{owner}/{repo}/{commit_sha}/{file_path}"
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=ingestion.HTTP_TIMEOUT) as client:
         resp = await client.get(url)
         if resp.status_code != 200:
             raise HTTPException(404, "File not found")

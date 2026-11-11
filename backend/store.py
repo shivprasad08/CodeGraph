@@ -19,6 +19,12 @@ from datetime import datetime, timedelta, timezone
 import db
 from graph_builder import GRAPH_SCHEMA_VERSION
 
+
+def _pr_schema():
+    from pr_impact import PR_SCHEMA_VERSION
+
+    return PR_SCHEMA_VERSION
+
 logger = logging.getLogger("codegraph.store")
 
 MAX_ATTEMPTS = 3
@@ -460,7 +466,7 @@ class PgStore:
             async with conn.transaction():
                 cur = await conn.execute(
                     "insert into pr_analyses (repo, pr_number, schema_version, status) values (%s, %s, %s, 'queued') returning id",
-                    (repo, number, GRAPH_SCHEMA_VERSION),
+                    (repo, number, _pr_schema()),
                 )
                 pr_id = (await cur.fetchone())["id"]
                 cur = await conn.execute(
@@ -482,7 +488,7 @@ class PgStore:
         row = await self._fetchone(
             "select id from pr_analyses where lower(repo) = lower(%s) and pr_number = %s and base_sha = %s"
             " and head_sha = %s and schema_version = %s and status = 'done'",
-            (repo, number, base_sha, head_sha, GRAPH_SCHEMA_VERSION),
+            (repo, number, base_sha, head_sha, _pr_schema()),
         )
         return row["id"] if row else None
 
@@ -539,7 +545,7 @@ class PgStore:
                             " partial = %s, error = null, error_code = null, finished_at = now(), updated_at = now()"
                             " where id = %s",
                             (meta["full_name"], meta["number"], meta["title"], meta["author"], meta["html_url"],
-                             base_sha, head_sha, meta["head_repo"], base_id, head_id, GRAPH_SCHEMA_VERSION, blob,
+                             base_sha, head_sha, meta["head_repo"], base_id, head_id, _pr_schema(), blob,
                              result["risk"]["score"], result["risk"]["level"], bool(result.get("partial")), own),
                         )
                 except errors.UniqueViolation:
@@ -554,7 +560,8 @@ class PgStore:
             return None
         return await self._fetchone(
             "select p.id, p.repo, p.pr_number, p.status, p.base_sha, p.head_sha, p.head_repo, p.base_analysis_id,"
-            " p.head_analysis_id, p.schema_version, ab.repo as base_repo, ah.repo as head_repo_name"
+            " p.head_analysis_id, p.schema_version, ab.repo as base_repo, ah.repo as head_repo_name,"
+            " ab.schema_version as base_schema, ah.schema_version as head_schema"
             " from pr_analyses p left join analyses ab on ab.id = p.base_analysis_id"
             " left join analyses ah on ah.id = p.head_analysis_id where p.id = %s",
             (pr_id,),

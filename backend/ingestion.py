@@ -90,7 +90,7 @@ async def _get_default_branch_and_sha(owner: str, repo: str, client: httpx.Async
     """Returns (branch_name, commit_sha)."""
     url = f"https://api.github.com/repos/{owner}/{repo}"
     print(f"[ingestion] GET {url}")
-    response = await client.get(url, timeout=10)
+    response = await client.get(url, timeout=HTTP_TIMEOUT)
     
     if response.status_code == 404:
         raise RepoNotFoundError(f"Repository not found: {owner}/{repo}")
@@ -106,7 +106,7 @@ async def _get_default_branch_and_sha(owner: str, repo: str, client: httpx.Async
     
     commits_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{default_branch}"
     print(f"[ingestion] GET {commits_url}")
-    commits_response = await client.get(commits_url, timeout=10)
+    commits_response = await client.get(commits_url, timeout=HTTP_TIMEOUT)
     
     if commits_response.status_code != 200:
         raise RuntimeError(f"GitHub API error {commits_response.status_code}: {commits_url}")
@@ -118,7 +118,7 @@ async def _get_default_branch_and_sha(owner: str, repo: str, client: httpx.Async
 async def _list_tree(owner: str, repo: str, sha: str, client: httpx.AsyncClient) -> list[dict]:
     url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
     print(f"[ingestion] GET {url}")
-    response = await client.get(url, timeout=10)
+    response = await client.get(url, timeout=HTTP_TIMEOUT)
     if response.status_code != 200:
         raise RuntimeError(f"GitHub API error {response.status_code}: {url}")
     return response.json().get("tree", [])
@@ -140,7 +140,7 @@ async def _fetch_single_file(owner: str, repo: str, sha: str, file_info: dict, c
     async with sem:
         print(f"[ingestion] GET {url}")
         try:
-            response = await client.get(url, timeout=10)
+            response = await client.get(url, timeout=HTTP_TIMEOUT)
             if response.status_code == 200:
                 out = {"path": path, "content": response.text}
                 if file_info.get("lang"):
@@ -160,6 +160,10 @@ async def _fetch_file_contents(owner: str, repo: str, sha: str, files: list[dict
     results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
 
+# Every GitHub request: 10 s to connect, 20 s to read/write (never an open-ended wait)
+HTTP_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+
+
 def _github_headers() -> dict:
     headers = {"Accept": "application/vnd.github.v3+json"}
     if GITHUB_TOKEN:
@@ -170,7 +174,7 @@ def _github_headers() -> dict:
 async def latest_commit(repo_url: str) -> tuple[str, str]:
     """(owner/repo, short sha of the default branch) — two API calls, no file contents."""
     owner, repo = await _parse_url(repo_url)
-    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=10.0) as client:
+    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=HTTP_TIMEOUT) as client:
         _branch, sha = await _get_default_branch_and_sha(owner, repo, client)
     return f"{owner}/{repo}", sha
 
@@ -178,7 +182,7 @@ async def latest_commit(repo_url: str) -> tuple[str, str]:
 async def repo_info(owner: str, repo: str, client: httpx.AsyncClient) -> dict:
     """GitHub's repo JSON. Raises RepoNotFoundError, RepoPrivateError (private repos are never read)."""
     url = f"https://api.github.com/repos/{owner}/{repo}"
-    response = await client.get(url, timeout=10)
+    response = await client.get(url, timeout=HTTP_TIMEOUT)
     if response.status_code == 404:
         raise RepoNotFoundError(f"Repository not found: {owner}/{repo}")
     if response.status_code == 403:
@@ -198,7 +202,7 @@ async def fetch_repo_at(owner: str, repo: str, sha: str, client: httpx.AsyncClie
     Raises FileLimitError, NoSourceError. The caller checks that the repo is public.
     """
     if client is None:
-        async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as own:
+        async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=HTTP_TIMEOUT) as own:
             return await fetch_repo_at(owner, repo, sha, own)
     files, manifest_paths = await _get_source_files(owner, repo, sha, client)
     file_contents = await _fetch_file_contents(owner, repo, sha, files, client)
@@ -219,6 +223,6 @@ async def fetch_repo(repo_url: str) -> dict:
     Raises: ValueError, RepoNotFoundError, RepoPrivateError, FileLimitError, NoSourceError
     """
     owner, repo = await _parse_url(repo_url)
-    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=30.0) as client:
+    async with httpx.AsyncClient(headers=_github_headers(), follow_redirects=True, timeout=HTTP_TIMEOUT) as client:
         _branch, sha = await _get_default_branch_and_sha(owner, repo, client)
         return await fetch_repo_at(owner, repo, sha, client)

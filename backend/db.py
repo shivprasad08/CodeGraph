@@ -47,7 +47,8 @@ async def open_pool(url: str, min_size: int = 1, max_size: int = 5) -> AsyncConn
         url,
         min_size=min_size,
         max_size=max_size,
-        kwargs={**CONNECT_KWARGS, "row_factory": dict_row},
+        # connect_timeout: an unreachable host fails after 10 s instead of hanging
+        kwargs={**CONNECT_KWARGS, "row_factory": dict_row, "connect_timeout": 10},
         # Neon closes idle connections (scale to zero): check before handing one out
         check=AsyncConnectionPool.check_connection,
         open=False,

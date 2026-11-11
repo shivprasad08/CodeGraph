@@ -1,5 +1,5 @@
 // Changes: every changed function/class, grouped by module. Selecting one shows it in Blast radius.
-import { FileX, Minus, PencilLine, Plus } from 'lucide-react';
+import { AlignLeft, FileText, FileX, Minus, PencilLine, Plus } from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { Button, focusRing } from '../../ui';
 
@@ -7,7 +7,12 @@ export const CHANGE_KIND = {
   added: { label: 'Added', Icon: Plus, className: 'text-cg-success' },
   modified: { label: 'Modified', Icon: PencilLine, className: 'text-cg-sev-med' },
   removed: { label: 'Removed', Icon: Minus, className: 'text-cg-sev-high' },
+  // Not code changes: shown for completeness, never scored or traced
+  docs: { label: 'Docs only', Icon: FileText, className: 'text-cg-tertiary', quiet: true },
+  format: { label: 'Format only', Icon: AlignLeft, className: 'text-cg-tertiary', quiet: true },
 };
+
+export const isCodeChange = (c) => !CHANGE_KIND[c.kind]?.quiet;
 
 function groupByModule(changes) {
   const groups = new Map();
@@ -68,8 +73,11 @@ export default function ChangesTab({ changes, selectedId, onSelect, onShowFiles 
                     <span className="min-w-0 flex-1">
                       <span className="block truncate font-cg-mono text-cg-sm text-cg-text">{c.qualified_name}</span>
                       <span className="block truncate font-cg-mono text-cg-xs text-cg-tertiary">{c.file}</span>
-                      {(c.signature_changed || c.breaking) && (
+                      {(c.signature_changed || c.breaking || kind.quiet) && (
                         <span className="mt-1 flex flex-wrap gap-1.5">
+                          {kind.quiet && (
+                            <span className="rounded border border-cg-border px-1.5 text-cg-xs text-cg-tertiary">{kind.label.toLowerCase()}</span>
+                          )}
                           {c.signature_changed && (
                             <span className="rounded border border-cg-border-strong px-1.5 text-cg-xs text-cg-secondary">
                               Signature {c.params_before} → {c.params_after} params
@@ -85,9 +93,11 @@ export default function ChangesTab({ changes, selectedId, onSelect, onShowFiles 
                       <span className="block font-cg-mono">
                         <span className="text-cg-success">+{c.lines_added}</span> <span className="text-cg-sev-high">−{c.lines_removed}</span>
                       </span>
-                      <span className="block text-cg-tertiary">
-                        {c.callers} caller{c.callers === 1 ? '' : 's'}
-                      </span>
+                      {!kind.quiet && (
+                        <span className="block text-cg-tertiary">
+                          {c.callers} caller{c.callers === 1 ? '' : 's'}
+                        </span>
+                      )}
                     </span>
                   </button>
                 </li>

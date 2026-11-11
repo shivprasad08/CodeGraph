@@ -200,6 +200,38 @@ describe('PR view', () => {
   });
 });
 
+describe('docs-only PR', () => {
+  it('lists docs changes with a "docs only" badge, scores nothing and has nothing to trace', async () => {
+    const docsOnly = {
+      ...RESULT,
+      changes: [{ id: 'app/a.py::Store.get', qualified_name: 'Store.get', file: 'app/a.py', module: 'core', kind: 'docs', lines_added: 3, lines_removed: 0, callers: 3, signature_changed: false, breaking: false }],
+      impacted: [],
+      signals: [],
+      modules: [{ label: 'core', changed: 0, impacted: 0, docs: 1 }],
+      stats: { changed: 0, docs: 1, format: 0, impacted: 0, files: 1 },
+      subgraph: { ...RESULT.subgraph, nodes: [], edges: [] },
+    };
+    api.subscribeToJob.mockImplementation((_id, _e, _err, onDone) => {
+      queueMicrotask(() => onDone({ status: 'done' }));
+      return () => {};
+    });
+    api.fetchPR.mockResolvedValue(docsOnly);
+    render(
+      <MemoryRouter initialEntries={['/pr/acme/app/7/jobs/j1']}>
+        <Routes>
+          <Route path="/pr/:owner/:repo/:number/jobs/:jobId" element={<PRView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('docs only')).toBeTruthy();
+    expect(screen.queryByText(/3 callers/)).toBeNull();
+    expect(screen.getByText(/1 docs or format only/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('tab', { name: 'Blast radius' }));
+    expect(screen.getByText(/only changes documentation or formatting/)).toBeTruthy();
+    expect(prArchitectureSpec(docsOnly).nodes.every((n) => !n.highlight)).toBe(true);
+  });
+});
+
 describe('PR helpers', () => {
   it('architecture spec: affected modules outlined, others faded, new dependencies dashed', () => {
     const spec = prArchitectureSpec(RESULT);

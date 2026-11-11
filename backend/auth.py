@@ -247,7 +247,7 @@ async def github_login(next: str | None = None):
 
 async def _github_user(code: str, verifier: str) -> dict | None:
     """Exchanges the code and reads the profile. The access token never leaves this function."""
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0)) as client:
         token_resp = await client.post(
             GITHUB_TOKEN_URL,
             headers={"Accept": "application/json"},

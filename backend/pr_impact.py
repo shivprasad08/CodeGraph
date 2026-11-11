@@ -14,14 +14,21 @@
 #      whose callers were not updated; a new import cycle (files or modules); a new dependency
 #      between modules.
 #   4. Risk 0–100 from named factors (each with points and a reason); Low < 30 ≤ Medium ≤ 60 < High.
+# A "modified" node whose code is unchanged once comments, docstrings and whitespace are
+# ignored becomes "docs" or "format" (pr_source.py): shown, but never scored, traced or
+# counted as code. A class whose own body is unchanged (the edit was in one of its methods)
+# is not a change at all.
 
 import asyncio
 import logging
 import math
+import re
 from collections import defaultdict
 
 import networkx as nx
 
+import pr_source
+from graph_builder import GRAPH_SCHEMA_VERSION
 from languages import registry
 from pr_diff import parse_patch
 
@@ -40,6 +47,13 @@ SIGNAL_POINTS = {"removed_but_called": 15, "signature_change": 12, "new_cycle": 
 FACTOR_MAX = {"changed": 15, "blast": 25, "hubs": 15, "breaking": 40, "spread": 10, "tests": 10}
 
 CODE_TYPES = ("function", "class")
+CODE_KINDS = ("added", "modified", "removed")
+QUIET_KINDS = ("docs", "format")  # shown, never scored
+
+# Bump when PR results change shape or meaning: stored PR results recompute (repo analyses stay).
+# 2: docs/format-only changes, containers not counted for their methods, plural wording.
+RESULT_VERSION = 2
+PR_SCHEMA_VERSION = GRAPH_SCHEMA_VERSION * 100 + RESULT_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +105,15 @@ class GraphIndex:
                 best = (end - start, -start, nid)
         return best[2] if best else None
 
+    def nested(self, nid: str) -> set[tuple[int, int]]:
+        """Line spans of the other functions/classes inside this one (same file)."""
+        node = self.nodes.get(nid) or {}
+        lines = node.get("lines") or []
+        if len(lines) != 2:
+            return set()
+        start, end = lines
+        return {(s, e) for s, e, other in self.by_file.get(node.get("file"), ()) if other != nid and start <= s and e <= end}
+
     def counterpart(self, node: dict, path: str) -> str | None:
         return self.by_qual.get((path, node.get("qualified_name") or node.get("label")))
 
@@ -102,10 +125,13 @@ class GraphIndex:
 # ---------------------------------------------------------------------------
 # 1. Mapping
 # ---------------------------------------------------------------------------
-def map_changes(pr_files: list[dict], base: GraphIndex, head: GraphIndex, truncated: bool = False) -> tuple[dict, list, bool]:
+def map_changes(pr_files: list[dict], base: GraphIndex, head: GraphIndex, truncated: bool = False,
+                sources: dict | None = None) -> tuple[dict, list, bool]:
     """
     (changes {key: entry}, files report, partial). Entry: id, base_id, head_id, kind
-    (added|modified|removed), lines_added, lines_removed, signature_changed, params_before/after.
+    (added|modified|removed|docs|format), lines_added, lines_removed, signature_changed,
+    params_before/after. `sources` = {"base": {path: text}, "head": {path: text}} lets a
+    modified node be reclassified (docs / format / no change); without it, it stays modified.
     """
     changes: dict[str, dict] = {}
     report: list[dict] = []
@@ -206,7 +232,53 @@ def map_changes(pr_files: list[dict], base: GraphIndex, head: GraphIndex, trunca
             and e["params_before"] is not None and e["params_after"] is not None
             and e["params_before"] != e["params_after"]
         )
+
+    if sources:
+        _reclassify(changes, base, head, sources)
+        # Per-file counts and notes after reclassification
+        per_file = defaultdict(list)
+        for e in changes.values():
+            per_file[e["file"]].append(e["kind"])
+            b = base.nodes.get(e["base_id"]) if e["base_id"] else None
+            if b and b.get("file") != e["file"]:
+                per_file[b["file"]].append(e["kind"])
+        for row in report:
+            if not row["mapped"] or row["note"]:
+                continue
+            kinds = per_file.get(row["filename"]) or per_file.get(row["previous_filename"] or "", [])
+            row["nodes"] = len(kinds)
+            if not kinds:
+                row["note"] = "No function or class code changed (layout around methods, imports or module-level code)"
+            elif all(k in QUIET_KINDS for k in kinds):
+                row["note"] = "Documentation or formatting only"
     return changes, report, partial
+
+
+def _reclassify(changes: dict, base: GraphIndex, head: GraphIndex, sources: dict) -> None:
+    """Modified nodes → docs / format, or dropped when a container's own code is unchanged."""
+    parsed = {}
+
+    def source(side, path):
+        key = (side, path)
+        if key not in parsed:
+            text = (sources.get(side) or {}).get(path)
+            parsed[key] = pr_source.SourceFile(path, text) if text is not None else None
+        return parsed[key]
+
+    for key in list(changes):
+        e = changes[key]
+        if e["kind"] != "modified" or not e["base_id"] or not e["head_id"]:
+            continue
+        b, h = base.nodes[e["base_id"]], head.nodes[e["head_id"]]
+        kind = pr_source.classify(
+            source("base", b["file"]), source("head", h["file"]), b.get("lines"), h.get("lines"),
+            base.nested(e["base_id"]), head.nested(e["head_id"]),
+        )
+        if kind == "none":
+            del changes[key]
+        elif kind in QUIET_KINDS:
+            e["kind"] = kind
+            e["signature_changed"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -330,27 +402,43 @@ def breaking_signals(changes: dict, base: GraphIndex, head: GraphIndex) -> list[
 # ---------------------------------------------------------------------------
 # 4. Risk
 # ---------------------------------------------------------------------------
-IRREGULAR = {"function or class": "functions or classes"}
+IRREGULAR = {"class": "classes"}
 
 
 def _plural(n, word):
     return f"{n} {word if n == 1 else IRREGULAR.get(word, word + 's')}"
 
 
+def _what(entries) -> str:
+    """'1 function', '2 functions', '1 class', '3 classes', or '4 functions or classes' when mixed."""
+    entries = list(entries)
+    classes = sum(1 for e in entries if e.get("type") == "class")
+    functions = len(entries) - classes
+    if not classes:
+        return _plural(functions, "function")
+    if not functions:
+        return _plural(classes, "class")
+    return f"{len(entries)} functions or classes"
+
+
 def risk_score(*, changes: dict, impacted: dict, graph_size: int, hubs_touched: list[str], signals: list[dict],
-               modules: list[str], source_changed: bool, tests_changed: int) -> dict:
-    """{score, level, factors: [{key, label, points, max, reason}]}. Pure function of its inputs."""
+               modules: list[str], source_changed: bool, tests_changed: int, quiet: int = 0) -> dict:
+    """
+    {score, level, factors: [{key, label, points, max, reason}]}. Pure function of its inputs.
+    `changes` are code changes only; `quiet` counts documentation/formatting-only changes.
+    """
     counts = defaultdict(int)
     for e in changes.values():
         counts[e["kind"]] += 1
     n = len(changes)
     factors = []
+    quiet_note = f"; {quiet} documentation or formatting change{'' if quiet == 1 else 's'} not counted" if quiet else ""
 
     factors.append({
         "key": "changed", "label": "Changed code", "max": FACTOR_MAX["changed"],
         "points": min(FACTOR_MAX["changed"], n),
-        "reason": (f"{_plural(n, 'function or class')} changed ({counts['added']} added, {counts['modified']} modified, {counts['removed']} removed)"
-                   if n else "No functions or classes changed"),
+        "reason": (f"{_what(changes.values())} changed ({counts['added']} added, {counts['modified']} modified, {counts['removed']} removed){quiet_note}"
+                   if n else "No code changed" + (" (documentation or formatting only)" if quiet else "")),
     })
 
     weighted = sum(1 if v["exact"] else 0.5 for v in impacted.values())
@@ -359,7 +447,7 @@ def risk_score(*, changes: dict, impacted: dict, graph_size: int, hubs_touched: 
     factors.append({
         "key": "blast", "label": "Blast radius", "max": FACTOR_MAX["blast"],
         "points": min(FACTOR_MAX["blast"], round(100 * share)),
-        "reason": (f"{_plural(len(impacted), 'function')} depend on the changes ({direct} direct) — {share:.0%} of the codebase"
+        "reason": (f"{_plural(len(impacted), 'caller')} {'depends' if len(impacted) == 1 else 'depend'} on the changes ({direct} direct) — {share:.0%} of the codebase"
                    + ("; name-matched links count half" if any(not v["exact"] for v in impacted.values()) else "")
                    if impacted else "Nothing else in the codebase calls the changed code"),
     })
@@ -386,12 +474,18 @@ def risk_score(*, changes: dict, impacted: dict, graph_size: int, hubs_touched: 
         "reason": f"Affects {_plural(m, 'module')}: {', '.join(modules[:4])}{'…' if m > 4 else ''}" if m else "No modules affected",
     })
 
-    no_tests = source_changed and tests_changed == 0
+    code_changed = source_changed and n > 0
+    no_tests = code_changed and tests_changed == 0
+    if no_tests:
+        tests_reason = "Source code changed but no test files did"
+    elif code_changed:
+        tests_reason = f"{_plural(tests_changed, 'test file')} changed"
+    else:
+        tests_reason = "Documentation or formatting only" if quiet else "No source code changed"
     factors.append({
         "key": "tests", "label": "Tests", "max": FACTOR_MAX["tests"],
         "points": FACTOR_MAX["tests"] if no_tests else 0,
-        "reason": ("Source code changed but no test files did" if no_tests
-                   else f"{_plural(tests_changed, 'test file')} changed" if tests_changed else "No source code changed"),
+        "reason": tests_reason,
     })
 
     score = min(100, sum(f["points"] for f in factors))
@@ -403,20 +497,30 @@ def risk_score(*, changes: dict, impacted: dict, graph_size: int, hubs_touched: 
 # 5. Summary
 # ---------------------------------------------------------------------------
 def deterministic_summary(meta: dict, changes: dict, impacted: dict, modules: list[str], signals: list[dict], risk: dict) -> str:
+    code = {k: e for k, e in changes.items() if e["kind"] in CODE_KINDS}
+    quiet = [e for e in changes.values() if e["kind"] in QUIET_KINDS]
     if not changes:
         return "This PR doesn't change any analysed functions or classes, so nothing else in the code graph depends on it."
+    if not code:
+        docs = [e for e in quiet if e["kind"] == "docs"]
+        what = "documentation" if docs and len(docs) == len(quiet) else "documentation or formatting" if docs else "formatting"
+        names = ", ".join(e["qualified_name"] for e in quiet[:3]) + ("…" if len(quiet) > 3 else "")
+        return (f"A {what}-only change: it updates docstrings, comments or layout in {_what(quiet)} ({names}) "
+                "without changing any code, so nothing that depends on them is affected.")
     counts = defaultdict(int)
-    for e in changes.values():
+    for e in code.values():
         counts[e["kind"]] += 1
     parts = [f"{counts[k]} {k}" for k in ("modified", "added", "removed") if counts[k]]
-    top = sorted(changes.values(), key=lambda e: -(e["lines_added"] + e["lines_removed"]))[:3]
-    text = f"Changes {_plural(len(changes), 'function or class')} ({', '.join(parts)}), mainly {', '.join(e['qualified_name'] for e in top)}."
+    top = sorted(code.values(), key=lambda e: -(e["lines_added"] + e["lines_removed"]))[:3]
+    text = f"Changes {_what(code.values())} ({', '.join(parts)}), mainly {', '.join(e['qualified_name'] for e in top)}."
     if impacted:
         direct = sum(1 for v in impacted.values() if v["depth"] == 1)
-        text += f" {_plural(len(impacted), 'function')} depend on them ({direct} direct callers)"
+        text += f" {_plural(len(impacted), 'caller')} {'depends' if len(impacted) == 1 else 'depend'} on them ({direct} direct)"
         text += f" across {', '.join(modules[:3])}." if modules else "."
     else:
         text += " Nothing else calls the changed code."
+    if quiet:
+        text += f" Also updates documentation or formatting in {_what(quiet)}."
     if signals:
         text += " Review carefully: " + "; ".join(s["message"] for s in signals[:2]) + "."
     else:
@@ -429,20 +533,32 @@ def deterministic_summary(meta: dict, changes: dict, impacted: dict, modules: li
 SUMMARY_SYSTEM = (
     "You summarise pull requests for code reviewers. Use ONLY the facts given; never guess at code you "
     f"were not shown. Plain prose, at most {SUMMARY_WORDS} words, no lists, no headings. Say what changed, "
-    "what depends on it, and what a reviewer should check carefully."
+    "what depends on it, and what a reviewer should check carefully. Changes marked docs or format only "
+    "touch docstrings, comments or layout and do not change behaviour: never present them as code changes, "
+    "and if every change is docs or format, describe the PR as a documentation or formatting change."
 )
+
+KIND_TEXT = {"docs": "docs only (docstrings/comments, no code change)", "format": "format only (layout, no code change)"}
 
 
 def summary_prompt(meta: dict, changes: dict, impacted: dict, modules: list[str], signals: list[dict], risk: dict) -> str:
-    lines = [f"PR #{meta['number']}: {meta['title']}", f"Risk: {risk['level']} ({risk['score']}/100)", "Changed code:"]
-    for e in sorted(changes.values(), key=lambda x: -(x["lines_added"] + x["lines_removed"]))[:15]:
+    code = sum(1 for e in changes.values() if e["kind"] in CODE_KINDS)
+    lines = [f"PR #{meta['number']}: {meta['title']}", f"Risk: {risk['level']} ({risk['score']}/100)",
+             f"Code changes: {code}; documentation or formatting only: {len(changes) - code}", "Changes:"]
+    ordered = sorted(changes.values(), key=lambda x: (x["kind"] in QUIET_KINDS, -(x["lines_added"] + x["lines_removed"])))
+    for e in ordered[:15]:
         sig = f", signature {e['params_before']}→{e['params_after']} params" if e.get("signature_changed") else ""
         about = f" — {e['summary'][:160]}" if e.get("summary") else ""
-        lines.append(f"- {e['kind']} {e['qualified_name']} in {e['file']} (+{e['lines_added']}/-{e['lines_removed']}{sig}){about}")
+        kind = KIND_TEXT.get(e["kind"], e["kind"])
+        lines.append(f"- {kind}: {e['qualified_name']} in {e['file']} (+{e['lines_added']}/-{e['lines_removed']}{sig}){about}")
     direct = sum(1 for v in impacted.values() if v["depth"] == 1)
-    lines.append(f"Dependents: {len(impacted)} functions ({direct} direct callers)")
+    lines.append(f"Dependents of the code changes: {_plural(len(impacted), 'caller')} ({direct} direct)")
     if modules:
         lines.append(f"Affected modules: {', '.join(modules[:8])}")
+    sig = [e["qualified_name"] for e in changes.values() if e.get("signature_changed")]
+    lines.append(f"Signature changes: {', '.join(sig[:6])}" if sig else "Signature changes: none (no parameter list changed)")
+    if not signals:
+        lines.append("Breaking-change signals: none")
     for s in signals[:6]:
         lines.append(f"Signal: {s['message']}")
     for f in risk["factors"]:
@@ -482,14 +598,18 @@ def _slim(node: dict, **extra) -> dict:
     return out
 
 
-def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict, truncated: bool = False) -> dict:
+def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict, truncated: bool = False,
+            sources: dict | None = None) -> dict:
     """The PR result (without the summary text, which may need the LLM)."""
     base, head = GraphIndex(base_graph), GraphIndex(head_graph)
-    changes, files, partial = map_changes(pr_files, base, head, truncated)
-    changed_ids = {i for e in changes.values() for i in (e["base_id"], e["head_id"]) if i}
+    changes, files, partial = map_changes(pr_files, base, head, truncated, sources)
+    # Only code changes are scored and traced; docs/format changes are listed
+    code = {k: e for k, e in changes.items() if e["kind"] in CODE_KINDS}
+    quiet = len(changes) - len(code)
+    changed_ids = {i for e in code.values() for i in (e["base_id"], e["head_id"]) if i}
 
-    base_seeds = {e["base_id"] for e in changes.values() if e["kind"] in ("modified", "removed") and e["base_id"]}
-    head_seeds = {e["head_id"] for e in changes.values() if e["kind"] == "added" and head.callers.get(e["head_id"])}
+    base_seeds = {e["base_id"] for e in code.values() if e["kind"] in ("modified", "removed") and e["base_id"]}
+    head_seeds = {e["head_id"] for e in code.values() if e["kind"] == "added" and head.callers.get(e["head_id"])}
     impacted_base, capped_a = blast_radius(base, base_seeds, changed_ids)
     impacted_head, capped_b = blast_radius(head, head_seeds, changed_ids, cap=max(0, MAX_IMPACTED - len(impacted_base)))
     impacted = {nid: {**v, "side": "base"} for nid, v in impacted_base.items()}
@@ -502,19 +622,19 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
         side, nid = (base, e["base_id"]) if e["base_id"] else (head, e["head_id"])
         e["callers"] = len({s for s, _ in side.callers.get(nid, ()) if s not in changed_ids})
 
-    signals = breaking_signals(changes, base, head)
+    signals = breaking_signals(code, base, head)
     breaking_nodes = {s["node"] for s in signals if s.get("node")}
     for e in changes.values():
         e["breaking"] = e["id"] in breaking_nodes
 
     # Modules: of the changed and impacted code
     head_mod, base_mod = head.module_of(), base.module_of()
-    module_counts = defaultdict(lambda: {"changed": 0, "impacted": 0})
+    module_counts = defaultdict(lambda: {"changed": 0, "impacted": 0, "docs": 0})
     for e in changes.values():
         label = head_mod.get(e["file"]) or base_mod.get(e["file"])
         e["module"] = label
         if label:
-            module_counts[label]["changed"] += 1
+            module_counts[label]["changed" if e["kind"] in CODE_KINDS else "docs"] += 1
     for nid, v in impacted.items():
         index = base if v["side"] == "base" else head
         f = _file_of(index, nid)
@@ -522,23 +642,25 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
         v["module"] = label
         if label:
             module_counts[label]["impacted"] += 1
-    modules = sorted(module_counts, key=lambda m: (-module_counts[m]["changed"], -module_counts[m]["impacted"], m))
+    # Modules affected by code (changed or impacted); docs-only modules are listed but not spread
+    modules = sorted((m for m, c in module_counts.items() if c["changed"] or c["impacted"]),
+                     key=lambda m: (-module_counts[m]["changed"], -module_counts[m]["impacted"], m))
+    quiet_modules = sorted(m for m, c in module_counts.items() if not (c["changed"] or c["impacted"]))
 
     hubs_touched = sorted({
-        e["qualified_name"] for e in changes.values()
+        e["qualified_name"] for e in code.values()
         if e["is_entry_point"] or (e["base_id"] in base.hubs) or (e["head_id"] in head.hubs)
     })
-    source_rows = [r for r in files if r["mapped"] and r["nodes"] and not r["test"]]
     tests_changed = sum(1 for r in files if r["test"])
     risk = risk_score(
-        changes=changes, impacted=impacted, graph_size=max(base.code_count, head.code_count),
+        changes=code, impacted=impacted, graph_size=max(base.code_count, head.code_count),
         hubs_touched=hubs_touched, signals=signals, modules=modules,
-        source_changed=bool(source_rows), tests_changed=tests_changed,
+        source_changed=bool(code), tests_changed=tests_changed, quiet=quiet,
     )
 
     # Subgraph for the blast-radius canvas: changed + impacted nodes, their files, calls between them
     sub_nodes: dict[str, dict] = {}
-    for e in changes.values():
+    for e in code.values():
         index, nid = (head, e["head_id"]) if e["head_id"] else (base, e["base_id"])
         sub_nodes[nid] = _slim(index.nodes[nid], pr_change=e["kind"], pr_breaking=e["breaking"], pr_signature=e["signature_changed"])
     for nid, v in impacted.items():
@@ -571,13 +693,14 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
     for e in changes.values():
         counts[e["kind"]] += 1
     return {
+        "result_version": RESULT_VERSION,
         "pr": meta,
         "partial": partial,
         "changes": sorted(changes.values(), key=lambda e: (e.get("module") or "", e["file"] or "", (e.get("lines") or [0])[0])),
         "impacted": [{"id": nid, "label": (base.nodes.get(nid) or head.nodes.get(nid) or {}).get("label", nid), **v} for nid, v in
                      sorted(impacted.items(), key=lambda kv: (kv[1]["depth"], kv[0]))],
         "impacted_capped": capped_a or capped_b,
-        "modules": [{"label": m, **module_counts[m]} for m in modules],
+        "modules": [{"label": m, **module_counts[m]} for m in modules + quiet_modules],
         "signals": signals,
         "risk": risk,
         "files": files,
@@ -587,7 +710,8 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
         },
         "architecture": {"base": arch_view(base), "head": arch_view(head)},
         "stats": {
-            "changed": len(changes), "added": counts["added"], "modified": counts["modified"], "removed": counts["removed"],
+            "changed": len(code), "added": counts["added"], "modified": counts["modified"], "removed": counts["removed"],
+            "docs": counts["docs"], "format": counts["format"],
             "impacted": len(impacted), "direct_callers": sum(1 for v in impacted.values() if v["depth"] == 1),
             "graph_size": max(base.code_count, head.code_count),
             "files": len(files), "files_mapped": sum(1 for r in files if r["mapped"]),
@@ -596,11 +720,24 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
     }
 
 
+SIGNATURE_CLAIM = re.compile(r"\bsignatures?\b|\bparameters? (?:list |count )?(?:change|changed|changes)\b|\bnew parameters?\b|\b(?:adds?|added|removes?|removed|drops?|dropped) (?:a |an |the )?(?:new )?(?:parameter|argument)s?\b", re.I)
+BREAKING_CLAIM = re.compile(r"\bbreaking\b|\bbreaks? (?:callers|compatibility|the api)\b", re.I)
+
+
+def contradicts_facts(text: str, changes: dict, signals: list[dict]) -> str | None:
+    """Why an AI summary claims something the analysis did not find (None when it doesn't)."""
+    if not any(e.get("signature_changed") for e in changes.values()) and SIGNATURE_CLAIM.search(text):
+        return "mentions a signature or parameter change, but none was detected"
+    if not signals and BREAKING_CLAIM.search(text):
+        return "mentions a breaking change, but no breaking-change signal fired"
+    return None
+
+
 async def summarise(result: dict) -> dict:
     """Adds result["summary"] = {text, source: "ai" | "rules"}; never raises."""
     changes = {e["id"]: e for e in result["changes"]}
     impacted = {i["id"]: i for i in result["impacted"]}
-    modules = [m["label"] for m in result["modules"]]
+    modules = [m["label"] for m in result["modules"] if m["changed"] or m["impacted"]]
     facts = (result["pr"], changes, impacted, modules, result["signals"], result["risk"])
     text = None
     if changes:
@@ -608,5 +745,10 @@ async def summarise(result: dict) -> dict:
             text = await ai_summary(summary_prompt(*facts))
         except Exception as e:
             logger.warning(f"[pr] summary failed: {type(e).__name__}")
+        problem = text and contradicts_facts(text, changes, result["signals"])
+        if problem:
+            # The model contradicted the analysis: the rule-based summary states only facts
+            logger.info(f"[pr] AI summary dropped: it {problem}")
+            text = None
     result["summary"] = {"text": text, "source": "ai"} if text else {"text": deterministic_summary(*facts), "source": "rules"}
     return result
