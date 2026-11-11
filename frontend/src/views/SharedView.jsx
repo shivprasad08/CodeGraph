@@ -43,6 +43,7 @@ export default function SharedView() {
         key={token}
         staticResult={data.result}
         jobId={data.job_id}
+        recalculating={data.recalculating}
         shared={{ sharedBy: data.share.shared_by, expiresAt: data.share.expires_at }}
       />
     );

@@ -52,7 +52,8 @@ QUIET_KINDS = ("docs", "format")  # shown, never scored
 
 # Bump when PR results change shape or meaning: stored PR results recompute (repo analyses stay).
 # 2: docs/format-only changes, containers not counted for their methods, plural wording.
-RESULT_VERSION = 2
+# 3: AI summaries fact-checked against the analysis (signature, breaking and count claims).
+RESULT_VERSION = 3
 PR_SCHEMA_VERSION = GRAPH_SCHEMA_VERSION * 100 + RESULT_VERSION
 
 
@@ -720,17 +721,133 @@ def analyse(meta: dict, pr_files: list[dict], base_graph: dict, head_graph: dict
     }
 
 
-SIGNATURE_CLAIM = re.compile(r"\bsignatures?\b|\bparameters? (?:list |count )?(?:change|changed|changes)\b|\bnew parameters?\b|\b(?:adds?|added|removes?|removed|drops?|dropped) (?:a |an |the )?(?:new )?(?:parameter|argument)s?\b", re.I)
-BREAKING_CLAIM = re.compile(r"\bbreaking\b|\bbreaks? (?:callers|compatibility|the api)\b", re.I)
+# ---------------------------------------------------------------------------
+# Fact check of the AI summary: claims the analysis does not support drop it (rules instead)
+# ---------------------------------------------------------------------------
+WORD_NUMBERS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+    "seventeen eighteen nineteen twenty".split())}
+CLAIM_WINDOW = 6  # words between the noun and its verb, either order
+SIG_NOUN = re.compile(r"^(?:signatures?|parameters?|params?|arguments?|args?)$")
+SIG_VERB = re.compile(r"^(?:chang\w*|new|modif\w*|alter\w*|updat\w*|different)$")
+NOW_TAKES = re.compile(r"\bnow\s+(?:takes|accepts|requires)\b", re.I)
+BREAK_WORD = re.compile(r"^(?:break\w*|broke|broken|incompatib\w*|backwards?-incompatib\w*)$")
+NEGATION = re.compile(r"^(?:no|not|without|never|none|nor|isn't|aren't|doesn't|don't|didn't|wasn't|weren't|unchanged)$")
+COUNT_CLAIM = re.compile(
+    r"\b(\d+|" + "|".join(WORD_NUMBERS) + r")\s+(?!of\b)(?:[A-Za-z][\w-]*\s+){0,2}?"
+    r"(modules?|files?|functions?|callers?|methods?|classes)\b", re.I)
 
 
-def contradicts_facts(text: str, changes: dict, signals: list[dict]) -> str | None:
-    """Why an AI summary claims something the analysis did not find (None when it doesn't)."""
-    if not any(e.get("signature_changed") for e in changes.values()) and SIGNATURE_CLAIM.search(text):
-        return "mentions a signature or parameter change, but none was detected"
-    if not signals and BREAKING_CLAIM.search(text):
-        return "mentions a breaking change, but no breaking-change signal fired"
+def _sentences(text: str) -> list[str]:
+    return [x.strip() for x in re.split(r"(?<=[.!?])\s+(?=[A-Z`\"'])", text) if x.strip()]
+
+
+def _words(sentence: str) -> list[str]:
+    return [w.strip("`'\".,;:()").lower() for w in re.findall(r"[\w`'\".-]+", sentence)]
+
+
+def _near(words: list[str], noun: re.Pattern, verb: re.Pattern) -> int | None:
+    """Index of a noun with a verb within CLAIM_WINDOW words (either order), not negated."""
+    for i, w in enumerate(words):
+        if not noun.match(w):
+            continue
+        lo, hi = max(0, i - CLAIM_WINDOW), min(len(words), i + CLAIM_WINDOW + 1)
+        if any(verb.match(words[j]) for j in range(lo, hi) if j != i):
+            if not any(NEGATION.match(words[j]) for j in range(max(0, i - 4), i)):
+                return i
     return None
+
+
+def _named_nodes(sentence: str, changes: dict) -> list[dict]:
+    """Changed nodes the sentence names (qualified name or bare name, as a whole word)."""
+    named = []
+    for e in changes.values():
+        for name in {e.get("qualified_name"), e.get("label")}:
+            if name and re.search(rf"(?<![\w.]){re.escape(name)}(?![\w])", sentence):
+                named.append(e)
+                break
+    return named
+
+
+def _count_facts(result: dict) -> dict[str, set[int]]:
+    code = [c for c in result["changes"] if c["kind"] in CODE_KINDS]
+    quiet = len(result["changes"]) - len(code)
+    impacted = len(result["impacted"])
+    direct = sum(1 for i in result["impacted"] if i["depth"] == 1)
+    modules = sum(1 for m in result["modules"] if m["changed"] or m["impacted"])
+    files = result.get("files", [])
+    source_files = len({c["file"] for c in code})
+    functions = {len(code), quiet, len(code) + quiet, impacted, direct}
+    return {
+        "module": {modules},
+        "file": {len(files), sum(1 for f in files if f["mapped"]), sum(1 for f in files if f.get("test")), source_files},
+        "function": functions,
+        "method": functions,
+        "caller": {impacted, direct},
+        "classe": {sum(1 for c in code if c.get("type") == "class")},
+    }
+
+
+def contradicts_facts(text: str, result: dict) -> tuple[str, list[str]] | None:
+    """
+    (rule, node ids) when the AI summary claims something the analysis did not find, else None.
+      signature: a signature/parameter change claim about a node without one (or about nothing
+                 while no node has one)
+      breaking:  a breaking/incompatible claim while no breaking-change signal fired
+      count:     "<number> modules/files/functions/callers/methods" that matches no fact
+    """
+    changes = {c["id"]: c for c in result["changes"]}
+    any_signature = any(c.get("signature_changed") for c in changes.values())
+    for sentence in _sentences(text):
+        words = _words(sentence)
+        if _near(words, SIG_NOUN, SIG_VERB) is not None or NOW_TAKES.search(sentence):
+            named = _named_nodes(sentence, changes)
+            # An added function's signature is new by definition: talking about it is fine
+            existing = [c for c in named if c["kind"] != "added"]
+            if existing and not any(c.get("signature_changed") for c in existing):
+                return "signature", [c["id"] for c in existing]
+            if not named and not any_signature and not any(c["kind"] == "added" for c in changes.values()):
+                return "signature", []
+        if not result["signals"]:
+            for i, w in enumerate(words):
+                if BREAK_WORD.match(w) and not any(NEGATION.match(words[j]) for j in range(max(0, i - 4), i)):
+                    return "breaking", [c["id"] for c in _named_nodes(sentence, changes)]
+    facts = _count_facts(result)
+    for m in COUNT_CLAIM.finditer(text):
+        raw, noun = m.group(1).lower(), m.group(2).lower()
+        n = int(raw) if raw.isdigit() else WORD_NUMBERS[raw]
+        key = noun[:-1] if noun.endswith("s") else noun
+        if n not in facts.get(key, {n}):
+            return "count", []
+    return None
+
+
+def _rules_summary(result: dict) -> str:
+    changes = {e["id"]: e for e in result["changes"]}
+    impacted = {i["id"]: i for i in result["impacted"]}
+    modules = [m["label"] for m in result["modules"] if m.get("changed") or m.get("impacted")]
+    return deterministic_summary(result["pr"], changes, impacted, modules, result["signals"], result["risk"])
+
+
+def checked_summary(result: dict) -> dict:
+    """
+    The result as served: a stored AI summary is fact-checked on every read (results computed
+    before the check existed may contain invented claims); a failing one is replaced by the
+    rule-based summary. Never raises; the stored result is not modified.
+    """
+    summary = result.get("summary") or {}
+    if summary.get("source") != "ai" or not summary.get("text"):
+        return result
+    try:
+        problem = contradicts_facts(summary["text"], result)
+        if not problem:
+            return result
+        rule, node_ids = problem
+        logger.info(f"[pr] stored AI summary replaced by the {rule} check (nodes: {', '.join(node_ids) or 'none named'})")
+        return {**result, "summary": {"text": _rules_summary(result), "source": "rules"}}
+    except Exception as e:  # an old result shape must not break serving it
+        logger.warning(f"[pr] summary check on read failed: {type(e).__name__}")
+        return result
 
 
 async def summarise(result: dict) -> dict:
@@ -745,10 +862,11 @@ async def summarise(result: dict) -> dict:
             text = await ai_summary(summary_prompt(*facts))
         except Exception as e:
             logger.warning(f"[pr] summary failed: {type(e).__name__}")
-        problem = text and contradicts_facts(text, changes, result["signals"])
+        problem = contradicts_facts(text, result) if text else None
         if problem:
             # The model contradicted the analysis: the rule-based summary states only facts
-            logger.info(f"[pr] AI summary dropped: it {problem}")
+            rule, node_ids = problem
+            logger.info(f"[pr] AI summary dropped by the {rule} check (nodes: {', '.join(node_ids) or 'none named'})")
             text = None
     result["summary"] = {"text": text, "source": "ai"} if text else {"text": deterministic_summary(*facts), "source": "rules"}
     return result

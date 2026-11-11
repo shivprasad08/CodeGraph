@@ -32,6 +32,10 @@ function openPath(a) {
 }
 
 function StatusText({ a }) {
+  if (a.status === 'done' && a.kind === 'pr' && a.stale) {
+    // Never shown as current: the score came from an older version of the scoring
+    return <span className="text-cg-sev-med">{a.recalculating ? 'Outdated score · recalculating' : 'Outdated score · recalculates when opened'}</span>;
+  }
   if (a.status === 'done' && a.kind === 'pr') {
     const level = RISK_LEVEL[a.risk_level];
     return level ? (

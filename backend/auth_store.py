@@ -118,9 +118,11 @@ class AuthStore:
         if not session or pr_analysis_id is None:
             return False
         column, owner = _owner(session)
+        # A recompute of a stale result belongs to whoever owns the result it replaces
         row = await self._one(
-            f"select 1 from user_analyses where {column} = %s and pr_analysis_id = %s and deleted_at is null limit 1",
-            (owner, pr_analysis_id),
+            f"select 1 from user_analyses where {column} = %s and deleted_at is null and (pr_analysis_id = %s"
+            f" or pr_analysis_id = (select replaces_id from pr_analyses where id = %s)) limit 1",
+            (owner, pr_analysis_id, pr_analysis_id),
         )
         return row is not None
 
@@ -158,7 +160,8 @@ class AuthStore:
             f"  coalesce(a.repo, p.repo) as repo, coalesce(a.commit_sha, p.head_sha) as commit_sha,"
             f"  coalesce(a.status, p.status) as status, a.languages, a.health_score, a.health_grade,"
             f"  coalesce(a.error_code, p.error_code) as error_code,"
-            f"  p.pr_number, p.title as pr_title, p.risk_score, p.risk_level, p.base_sha,"
+            f"  p.pr_number, p.title as pr_title, p.risk_score, p.risk_level, p.base_sha, p.result_version,"
+            f"  exists(select 1 from pr_analyses r where r.replaces_id = p.id and r.status in ('queued', 'running')) as recalculating,"
             f"  (select count(*) from share_links sl join user_analyses u2 on u2.id = sl.user_analysis_id"
             f"   where coalesce(u2.analysis_id, u2.pr_analysis_id) = coalesce(ua.analysis_id, ua.pr_analysis_id)"
             f"   and u2.{column} = %(o)s and u2.deleted_at is null"

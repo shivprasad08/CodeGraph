@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from auth import current_session, runtime, sign_in_required, signed_in
 from auth_store import SHARE_EXPIRY_DAYS
+from pr_impact import RESULT_VERSION as PR_RESULT_VERSION, checked_summary
 
 router = APIRouter()
 
@@ -69,6 +70,9 @@ async def my_analyses(request: Request):
             "risk_score": r["risk_score"],
             "risk_level": r["risk_level"],
             "base_sha": r["base_sha"],
+            # A PR result from an older result version: shown as outdated, recomputed when opened
+            "stale": r["kind"] == "pr" and r["status"] == "done" and r["result_version"] != PR_RESULT_VERSION,
+            "recalculating": bool(r["recalculating"]),
             "created_at": _iso(r["created_at"]),
             "shares": r["shares"],
         } for r in rows],
@@ -108,8 +112,15 @@ async def create_share(body: ShareRequest, request: Request):
     }, headers=_no_store())
 
 
+def _ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 @router.get("/shares/{token}")
-async def open_share(token: str):
+async def open_share(token: str, request: Request):
     if runtime.auth is None:
         return _unavailable()
     share = await runtime.auth.get_share(token)
@@ -118,8 +129,10 @@ async def open_share(token: str):
         if not result:
             return JSONResponse(status_code=404, content=SHARE_GONE, headers=_no_store())
         await runtime.auth.record_share_view(share["id"])
+        recompute = await runtime.recompute_pr(share["pr_analysis_id"], result, _ip(request)) if runtime.recompute_pr else None
         return JSONResponse({
             "kind": "pr",
+            "recalculating": {"job_id": recompute} if recompute else None,
             "share": {
                 "repo": share["repo"],
                 "pr_number": share["pr_number"],
@@ -127,7 +140,7 @@ async def open_share(token: str):
                 "shared_by": {"login": share["shared_by_login"], "avatar_url": share["shared_by_avatar"]},
             },
             "job_id": str(share["job_id"]) if share["job_id"] else None,
-            "result": result,
+            "result": checked_summary(result),
         }, headers=_no_store())
     graph = await runtime.load_graph(share["analysis_id"], share["repo"], share["commit_sha"], share["schema_version"]) if share else None
     if not share or not graph:

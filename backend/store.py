@@ -25,6 +25,12 @@ def _pr_schema():
 
     return PR_SCHEMA_VERSION
 
+
+def _pr_result_version():
+    from pr_impact import RESULT_VERSION
+
+    return RESULT_VERSION
+
 logger = logging.getLogger("codegraph.store")
 
 MAX_ATTEMPTS = 3
@@ -485,12 +491,63 @@ class PgStore:
         return str(row["id"])
 
     async def find_done_pr(self, repo: str, number: int, base_sha: str, head_sha: str):
+        """A finished result for this PR at these commits — only of the current result version."""
         row = await self._fetchone(
             "select id from pr_analyses where lower(repo) = lower(%s) and pr_number = %s and base_sha = %s"
-            " and head_sha = %s and schema_version = %s and status = 'done'",
-            (repo, number, base_sha, head_sha, _pr_schema()),
+            " and head_sha = %s and schema_version = %s and result_version = %s and status = 'done'",
+            (repo, number, base_sha, head_sha, _pr_schema(), _pr_result_version()),
         )
         return row["id"] if row else None
+
+    async def ensure_pr_recompute(self, stale_id, repo_url: str, ip: str) -> str | None:
+        """
+        A job recomputing a stale PR result (an active one is reused). When it finishes, the stale
+        result's jobs and history rows (and so its share links) move to the new result.
+        """
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute("select pg_advisory_xact_lock(hashtext(%s))", (f"pr-recompute:{stale_id}",))
+                cur = await conn.execute(
+                    "select j.id from jobs j join pr_analyses p on p.id = j.pr_analysis_id"
+                    " where p.replaces_id = %s and p.status in ('queued', 'running') limit 1",
+                    (stale_id,),
+                )
+                active = await cur.fetchone()
+                if active:
+                    return str(active["id"])
+                cur = await conn.execute("select repo, pr_number from pr_analyses where id = %s", (stale_id,))
+                stale = await cur.fetchone()
+                if stale is None:
+                    return None
+                cur = await conn.execute(
+                    "insert into pr_analyses (repo, pr_number, schema_version, status, replaces_id)"
+                    " values (%s, %s, %s, 'queued', %s) returning id",
+                    (stale["repo"], stale["pr_number"], _pr_schema(), stale_id),
+                )
+                pr_id = (await cur.fetchone())["id"]
+                cur = await conn.execute(
+                    "insert into jobs (pr_analysis_id, repo_url, status, stage, progress, message, client_ip_hash)"
+                    " values (%s, %s, 'queued', 'queued', 0, 'Recalculating', %s) returning id",
+                    (pr_id, repo_url, hash_ip(ip)),
+                )
+                return str((await cur.fetchone())["id"])
+
+    async def pr_replaces(self, pr_id):
+        """The stale result this (recompute) PR analysis replaces, if any."""
+        if pr_id is None:
+            return None
+        row = await self._fetchone("select replaces_id from pr_analyses where id = %s", (pr_id,))
+        return row["replaces_id"] if row else None
+
+    async def _retire_replaced(self, conn, own, target) -> None:
+        """A recompute finished on `target`: the stale result's jobs and owners move to it."""
+        cur = await conn.execute("select replaces_id from pr_analyses where id = %s", (own,))
+        stale = (await cur.fetchone() or {}).get("replaces_id")
+        if not stale or stale == target:
+            return
+        await conn.execute("update jobs set pr_analysis_id = %s where pr_analysis_id = %s", (target, stale))
+        await conn.execute("update user_analyses set pr_analysis_id = %s where pr_analysis_id = %s", (target, stale))
+        await conn.execute("delete from pr_analyses where id = %s", (stale,))
 
     async def _finish_pr_on(self, conn, job_id: str, pr_id, message: str) -> None:
         await conn.execute(
@@ -523,6 +580,7 @@ class PgStore:
                     return False
                 await self._finish_pr_on(conn, job_id, existing, CACHED_MESSAGE)
                 if own and own != existing:
+                    await self._retire_replaced(conn, own, existing)
                     await self._drop_pr_placeholder(conn, own, existing)
                 return True
 
@@ -541,16 +599,19 @@ class PgStore:
                         await conn.execute(
                             "update pr_analyses set repo = %s, pr_number = %s, title = %s, author = %s, html_url = %s,"
                             " base_sha = %s, head_sha = %s, head_repo = %s, base_analysis_id = %s, head_analysis_id = %s,"
-                            " schema_version = %s, status = 'done', result_gz = %s, risk_score = %s, risk_level = %s,"
-                            " partial = %s, error = null, error_code = null, finished_at = now(), updated_at = now()"
-                            " where id = %s",
+                            " schema_version = %s, result_version = %s, status = 'done', result_gz = %s, risk_score = %s,"
+                            " risk_level = %s, partial = %s, error = null, error_code = null, finished_at = now(),"
+                            " updated_at = now() where id = %s",
                             (meta["full_name"], meta["number"], meta["title"], meta["author"], meta["html_url"],
-                             base_sha, head_sha, meta["head_repo"], base_id, head_id, _pr_schema(), blob,
-                             result["risk"]["score"], result["risk"]["level"], bool(result.get("partial")), own),
+                             base_sha, head_sha, meta["head_repo"], base_id, head_id, _pr_schema(),
+                             result.get("result_version"), blob, result["risk"]["score"], result["risk"]["level"],
+                             bool(result.get("partial")), own),
                         )
                 except errors.UniqueViolation:
                     target = await self.find_done_pr(meta["full_name"], meta["number"], base_sha, head_sha)
                 await self._finish_pr_on(conn, job_id, target, "Analysis complete")
+                if own:
+                    await self._retire_replaced(conn, own, target)
                 if own and target != own:
                     await self._drop_pr_placeholder(conn, own, target)
         logger.info(f"[store] saved PR {meta['full_name']}#{meta['number']}: {len(blob) / 1024:.1f} KB compressed")

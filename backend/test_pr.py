@@ -337,6 +337,8 @@ async def pg(tmp_path, monkeypatch):
     monkeypatch.setattr(auth.runtime, "auth", auth_store.AuthStore(s.pool))
     monkeypatch.setattr(auth.runtime, "load_graph", main._graph_by_analysis)
     monkeypatch.setattr(auth.runtime, "load_pr", s.pr_result)
+    monkeypatch.setattr(auth.runtime, "store", s)
+    monkeypatch.setattr(auth.runtime, "recompute_pr", main._recompute_if_stale)
     monkeypatch.setattr(main.cache.config, "CACHE_DIR", str(tmp_path))
     main.analyze_counts.clear()
     try:
@@ -494,3 +496,135 @@ async def test_l1_cache_is_refilled_after_database_reads(pg, tmp_path):
             f.unlink()
         assert (await client.get("/chat/acme/app/cccccccc/suggestions")).status_code == 200
         assert main.cache.read_cache("acme/app", "cccccccc") == graph
+
+
+# ---------------------------------------------------------------------------
+# Stale PR results (older result_version) are recomputed, never served as current
+# ---------------------------------------------------------------------------
+async def _store_stale_result(pg, user_id) -> dict:
+    """A finished PR result from before result versions (no result_version), owned by the user."""
+    old = pr_impact.analyse(META, PR_FILES, BASE, HEAD)
+    old.pop("result_version")
+    old["summary"] = {"text": "old", "source": "rules"}
+    pr_id = (await _sql(pg,
+        "insert into pr_analyses (repo, pr_number, title, author, html_url, base_sha, head_sha, head_repo, schema_version,"
+        " status, result_gz, risk_score, risk_level, finished_at) values ('acme/app', 7, 'Tidy store', 'dev', %s,"
+        " 'aaaaaaaa', 'bbbbbbbb', 'acme/app', %s, 'done', %s, 44, 'medium', now()) returning id",
+        (META["html_url"], pr_impact.PR_SCHEMA_VERSION, db.compress_graph(old))))[0]["id"]
+    job_id = (await _sql(pg,
+        "insert into jobs (pr_analysis_id, repo_url, status, stage, progress, message) values"
+        " (%s, 'https://github.com/acme/app/pull/7', 'done', 'done', 100, 'Analysis complete') returning id", (pr_id,)))[0]["id"]
+    ua = (await _sql(pg, "insert into user_analyses (user_id, pr_analysis_id, job_id, kind) values (%s, %s, %s, 'pr') returning id",
+                     (user_id, pr_id, job_id)))[0]["id"]
+    return {"pr_id": pr_id, "job_id": str(job_id), "ua": str(ua)}
+
+
+async def _run_queued_pr_jobs(pg):
+    async def fake_fetch_pr(owner, repo, number):
+        return {"meta": META, "files": PR_FILES, "truncated": False}
+
+    async def no_fetch(*a, **k):
+        raise AssertionError("base and head were cached")
+
+    with patch("github_pr.fetch_pr", fake_fetch_pr), patch("ingestion.fetch_repo_at", no_fetch):
+        while (claimed := await pg.claim_job("w-test")) is not None:
+            await main._run_pipeline(claimed["id"], claimed["repo_url"])
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_a_stale_pr_result_is_not_reused_and_recomputes_to_the_current_version(pg):
+    await _seed_pr(pg)
+    user = await auth.runtime.auth.upsert_user(6001, "owner", None, None)
+    token, _ = await auth.runtime.auth.create_session(user["id"])
+    stale = await _store_stale_result(pg, user["id"])
+
+    async def meta_now(*_a):
+        return META
+
+    async with browser("10.4.4.4") as owner, browser("10.5.5.5") as stranger:
+        owner.cookies.set(auth.SESSION_COOKIE, token)
+
+        # 1. Analyze: the stale result is not a hit
+        with patch.object(main, "_latest_pr", meta_now):
+            r = (await owner.post("/analyze", json={"repo_url": "https://github.com/acme/app/pull/7"})).json()
+        assert r["status"] == "queued"
+
+        # 2. The old job link: old result, marked as recalculating (one recompute job, reused)
+        first = (await owner.get(f"/pr/{stale['job_id']}")).json()
+        assert "result_version" not in first and first["recalculating"]["job_id"]
+        again = (await owner.get(f"/pr/{stale['job_id']}")).json()
+        assert again["recalculating"]["job_id"] == first["recalculating"]["job_id"]
+        listed = {a["job_id"]: a for a in (await owner.get("/me/analyses")).json()["analyses"]}
+        assert listed[stale["job_id"]]["stale"] and listed[stale["job_id"]]["recalculating"]
+
+        # 3. A share link of the stale result: marked recalculating; its token opens the recompute job
+        share = (await owner.post("/shares", json={"user_analysis_id": stale["ua"], "expires_in_days": 7})).json()
+        tok = share["url"].removeprefix("/s/")
+        shared = (await stranger.get(f"/shares/{tok}")).json()
+        assert shared["recalculating"]["job_id"] == first["recalculating"]["job_id"]
+        recompute_id = shared["recalculating"]["job_id"]
+        assert (await stranger.get(f"/pr/{recompute_id}", headers={"X-Share-Token": tok})).status_code == 202
+        assert (await stranger.get(f"/pr/{recompute_id}")).status_code == 403  # not without the token
+
+        # 4. Recompute: the new result has the current version; old links, history and the share follow it
+        await _run_queued_pr_jobs(pg)
+        new = (await owner.get(f"/pr/{recompute_id}")).json()
+        assert new["result_version"] == pr_impact.RESULT_VERSION == 3
+        via_old_link = (await owner.get(f"/pr/{stale['job_id']}")).json()
+        assert via_old_link["result_version"] == 3 and "recalculating" not in via_old_link
+        assert (await stranger.get(f"/shares/{tok}")).json()["result"]["result_version"] == 3
+        listed = (await owner.get("/me/analyses")).json()["analyses"]
+        assert listed and not any(a["stale"] for a in listed)
+        fresh = (await owner.get(f"/pr/{r['job_id']}")).json()
+        assert fresh["result_version"] == 3
+    rows = await _sql(pg, "select count(*) as n from pr_analyses where result_version is null")
+    assert rows[0]["n"] == 0  # the stale row is gone
+
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_serving_a_stored_result_does_not_count_toward_the_limit(pg, monkeypatch):
+    monkeypatch.setattr(config, "ANALYZE_LIMIT_PER_HOUR", 1)
+    await _seed_pr(pg)
+
+    async def meta_now(*_a):
+        return META
+
+    async with browser("10.6.6.6") as client:
+        with patch.object(main, "_latest_pr", meta_now):
+            first = (await client.post("/analyze", json={"repo_url": "https://github.com/acme/app/pull/7"})).json()
+            assert first["status"] == "queued"  # counted: 1 of 1
+            await _run_queued_pr_jobs(pg)
+            for _ in range(3):  # the stored result is served again and again, never counted
+                again = await client.post("/analyze", json={"repo_url": "https://github.com/acme/app/pull/7"})
+                assert again.status_code == 200 and again.json()["status"] == "done"
+        # New work is still limited
+        r = await client.post("/analyze", json={"repo_url": "https://github.com/acme/other"})
+        assert r.status_code == 429 and r.json()["error_code"] == "rate_limited"
+    rows = await _sql(pg, "select count(*) as n from rate_events")
+    assert rows[0]["n"] == 2  # one per key (session, IP) for the single queued analysis
+
+
+@needs_db
+@pytest.mark.asyncio
+async def test_get_pr_serves_a_fact_checked_summary(pg):
+    await _seed_pr(pg)
+    async with browser("10.7.7.7") as client:
+        r = (await client.post("/analyze", json={"repo_url": "https://github.com/acme/app/pull/7"})).json()
+        with patch("pr_impact.ai_summary", return_value="Store.get now takes a new argument, changing its signature."):
+            await _run_queued_pr_jobs(pg)
+        served = (await client.get(f"/pr/{r['job_id']}")).json()
+        # Store.get's signature did change in this fixture (1 -> 2 params): the claim stands
+        assert served["summary"]["source"] == "ai"
+
+        # A stored summary with an invented claim (as computed before the check existed)
+        blob = (await _sql(pg, "select result_gz from pr_analyses where status = 'done'"))[0]["result_gz"]
+        stored = db.decompress_graph(blob)
+        stored["summary"] = {"text": "Five modules call the altered helpers.", "source": "ai"}
+        await _sql(pg, "update pr_analyses set result_gz = %s where status = 'done'", (db.compress_graph(stored),))
+        served = (await client.get(f"/pr/{r['job_id']}")).json()
+        assert served["summary"]["source"] == "rules" and "Five modules" not in served["summary"]["text"]
+        share = (await client.post("/shares", json={"user_analysis_id": r["user_analysis_id"], "expires_in_days": 7})).json()
+    assert share.get("error_code") == "sign_in_required"  # anonymous: no share links (checked via the share test below)

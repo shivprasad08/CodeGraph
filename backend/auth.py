@@ -49,7 +49,7 @@ PRIVATE = {"error": "This analysis is private.", "error_code": "private_analysis
 # Set by main at startup: runtime.auth is the AuthStore (None without Postgres: no access control);
 # runtime.load_graph(analysis_id, repo, sha, schema_version) reads a stored graph;
 # runtime.load_pr(pr_analysis_id) reads a stored PR result
-runtime = SimpleNamespace(auth=None, load_graph=None, load_pr=None)
+runtime = SimpleNamespace(auth=None, load_graph=None, load_pr=None, store=None, recompute_pr=None)
 
 router = APIRouter()
 
@@ -164,8 +164,12 @@ async def can_view_pr(request: Request, pr_analysis_id) -> bool:
     if runtime.auth is None:
         return True
     share = await current_share(request)
-    if share and pr_analysis_id is not None and str(share.get("pr_analysis_id")) == str(pr_analysis_id):
-        return True
+    if share and pr_analysis_id is not None and share.get("pr_analysis_id"):
+        if str(share["pr_analysis_id"]) == str(pr_analysis_id):
+            return True
+        # The share's result is stale and this is its recompute
+        if runtime.store is not None and str(await runtime.store.pr_replaces(pr_analysis_id)) == str(share["pr_analysis_id"]):
+            return True
     return await runtime.auth.owns_pr_analysis(await current_session(request), pr_analysis_id)
 
 

@@ -177,6 +177,8 @@ async def lifespan(app: FastAPI):
         auth.runtime.auth = auth_store.AuthStore(store.pool)
         auth.runtime.load_graph = _graph_by_analysis
         auth.runtime.load_pr = store.pr_result
+        auth.runtime.store = store
+        auth.runtime.recompute_pr = _recompute_if_stale
         if not (config.GITHUB_OAUTH_CLIENT_ID and config.GITHUB_OAUTH_CLIENT_SECRET and config.SESSION_SECRET):
             logger.warning("[auth] GitHub sign-in is not configured: analyses stay anonymous (per browser session)")
     else:
@@ -582,52 +584,12 @@ async def analyze(request: Request, body: AnalyzeRequest):
         })
     session = await auth.ensure_session(request)  # anonymous session on a first visit
 
-    # Rate limiting: analyses started per hour (signed in: per user; anonymous: per session and IP)
-    if auth.access_control_enabled():
-        if auth.signed_in(session):
-            limit, keys = config.ANALYZE_LIMIT_SIGNED_IN, [f"analyze:user:{session['user_id']}"]
-        else:
-            limit = config.ANALYZE_LIMIT_PER_HOUR
-            keys = [f"analyze:session:{session['id']}", f"analyze:ip:{store_mod.hash_ip(ip)}"]
-        wait_s = await auth.runtime.auth.rate_hit(keys, limit, timedelta(hours=1))
-    else:
-        limit = config.ANALYZE_LIMIT_PER_HOUR
-        now = datetime.now(timezone.utc)
-        recent = [t for t in analyze_counts.get(ip, []) if t > now - timedelta(hours=1)]
-        wait_s = None
-        if len(recent) >= limit:
-            wait_s = (recent[0] + timedelta(hours=1) - now).total_seconds()
-        else:
-            recent.append(now)
-        analyze_counts[ip] = recent
-    if wait_s is not None:
-        wait_min = max(1, int(wait_s // 60) + 1)
-        return auth.attach_new_session(request, JSONResponse(
-            status_code=429,
-            content={
-                "error": (
-                    f"You've started {limit} analyses in the last hour. "
-                    f"Try again in {wait_min} minute{'s' if wait_min != 1 else ''}."
-                ),
-                "error_code": "rate_limited",
-                "detail": None,
-            },
-        ))
-
-    # Rate limiting: max 5 active jobs per IP
-    if await store.active_jobs_for_ip(ip) >= 5:
-        return auth.attach_new_session(request, JSONResponse(
-            status_code=429,
-            content={
-                "error": "Too many active jobs from this IP. Wait for existing jobs to complete.",
-                "detail": None
-            }
-        ))
-
+    # The hourly limit applies only when work is queued (serving a stored result is free)
     if pr_ref:
         return await _analyze_pr(request, session, ip, *pr_ref)
 
     # Latest commit already analysed with this graph schema: a job that is done straight away
+    # (serving a stored result does not count toward the limit)
     status = "queued"
     job_id = None
     latest = await _latest_commit(body.repo_url)
@@ -638,6 +600,9 @@ async def analyze(request: Request, body: AnalyzeRequest):
             status = "done"
             logger.info(f"[analyze] {latest[0]}@{latest[1]} already analysed: job {job_id} done")
     if job_id is None:
+        limited = await _analyze_limit(request, session, ip)
+        if limited:
+            return limited
         job_id = await store.create_job(body.repo_url, ip)
         if worker:
             worker.wake()
@@ -652,6 +617,55 @@ async def analyze(request: Request, body: AnalyzeRequest):
     ))
 
 
+def _rate_limited_response(request: Request, limit: int, wait_s: float) -> JSONResponse:
+    wait_min = max(1, int(wait_s // 60) + 1)
+    return auth.attach_new_session(request, JSONResponse(
+        status_code=429,
+        content={
+            "error": (
+                f"You've started {limit} analyses in the last hour. "
+                f"Try again in {wait_min} minute{'s' if wait_min != 1 else ''}."
+            ),
+            "error_code": "rate_limited",
+            "detail": None,
+        },
+    ))
+
+
+async def _analyze_limit(request: Request, session, ip: str) -> JSONResponse | None:
+    """
+    Called right before a job is queued, and counts it: the hourly analysis limit (signed in:
+    per user; anonymous: per session and per IP) and at most 5 active jobs per IP. Requests
+    answered from a stored result never get here. A 429 response when over a limit, else None.
+    """
+    window = timedelta(hours=1)
+    if auth.access_control_enabled():
+        if auth.signed_in(session):
+            limit, keys = config.ANALYZE_LIMIT_SIGNED_IN, [f"analyze:user:{session['user_id']}"]
+        else:
+            limit = config.ANALYZE_LIMIT_PER_HOUR
+            keys = [f"analyze:session:{session['id']}", f"analyze:ip:{store_mod.hash_ip(ip)}"]
+        wait_s = await auth.runtime.auth.rate_hit(keys, limit, window)
+    else:
+        limit = config.ANALYZE_LIMIT_PER_HOUR
+        now = datetime.now(timezone.utc)
+        recent = [t for t in analyze_counts.get(ip, []) if t > now - window]
+        wait_s = None
+        if len(recent) >= limit:
+            wait_s = (recent[0] + window - now).total_seconds()
+        else:
+            recent.append(now)
+        analyze_counts[ip] = recent
+    if wait_s is not None:
+        return _rate_limited_response(request, limit, wait_s)
+    if await store.active_jobs_for_ip(ip) >= 5:
+        return auth.attach_new_session(request, JSONResponse(
+            status_code=429,
+            content={"error": "Too many active jobs from this IP. Wait for existing jobs to complete.", "detail": None},
+        ))
+    return None
+
+
 async def _analyze_pr(request: Request, session, ip: str, owner: str, repo: str, number: int):
     """A PR job: done at once when this PR at its current commits was analysed before."""
     url = github_pr.pr_url(owner, repo, number)
@@ -663,6 +677,9 @@ async def _analyze_pr(request: Request, session, ip: str, owner: str, repo: str,
             job_id = await store.create_done_pr_job(url, ip, existing)
             status = "done"
     if job_id is None:
+        limited = await _analyze_limit(request, session, ip)
+        if limited:
+            return limited
         job_id = await store.create_pr_job(url, ip, f"{owner}/{repo}", number)
         if worker:
             worker.wake()
@@ -804,6 +821,24 @@ async def get_analysis(job_id: str, request: Request):
     )
 
 
+async def _recompute_if_stale(pr_id, result: dict | None, ip: str) -> str | None:
+    """
+    A stored PR result from an older result version is never served as current: this starts
+    (or reuses) a job that recomputes it and returns that job's id; None when it is current.
+    """
+    if result is None or result.get("result_version") == pr_impact.RESULT_VERSION:
+        return None
+    row = await store.pr_row(pr_id)
+    if not row:
+        return None
+    owner, name = row["repo"].split("/", 1)
+    job_id = await store.ensure_pr_recompute(pr_id, github_pr.pr_url(owner, name, row["pr_number"]), ip)
+    if worker:
+        worker.wake()
+    logger.info(f"[pr] stale result {pr_id} (version {result.get('result_version')}): recomputing in job {job_id}")
+    return job_id
+
+
 @app.get("/pr/{job_id}")
 async def get_pr_result(job_id: str, request: Request):
     """A PR analysis result (owner, or a share token for it)."""
@@ -817,7 +852,12 @@ async def get_pr_result(job_id: str, request: Request):
     result = await store.pr_result(job.get("pr_analysis_id"))
     if not result:
         return JSONResponse(status_code=500, content={"error": "PR result missing, run the analysis again", "detail": None})
-    return JSONResponse({**result, "job_id": job_id}, headers={"Cache-Control": "private, no-store"})
+    body = {**pr_impact.checked_summary(result), "job_id": job_id}
+    recompute = await _recompute_if_stale(job.get("pr_analysis_id"), result, _client_ip(request))
+    if recompute:
+        # Shown as outdated while the new result is computed (never as current)
+        body["recalculating"] = {"job_id": recompute}
+    return JSONResponse(body, headers={"Cache-Control": "private, no-store"})
 
 
 @app.get("/pr/{job_id}/graph/{side}")

@@ -212,3 +212,119 @@ def test_prompt_states_when_there_are_no_signature_changes():
     changes = {c["id"]: c for c in result["changes"]}
     prompt = pr_impact.summary_prompt(result["pr"], changes, {}, [], [], result["risk"])
     assert "Signature changes: none" in prompt and "Breaking-change signals: none" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Fact check: paraphrased claims (the #6168 sentence and friends)
+# ---------------------------------------------------------------------------
+FLASK_6168 = {
+    "changes": [
+        {"id": "src/flask/helpers.py::_CollectErrors.raise_any", "qualified_name": "_CollectErrors.raise_any", "label": "raise_any",
+         "kind": "modified", "signature_changed": False, "file": "src/flask/helpers.py", "type": "function"},
+        {"id": "src/flask/sessions.py::SessionInterface.get_expiration_time", "qualified_name": "SessionInterface.get_expiration_time",
+         "label": "get_expiration_time", "kind": "modified", "signature_changed": False, "file": "src/flask/sessions.py", "type": "function"},
+        {"id": "src/flask/cli.py::SeparatedPathType.convert", "qualified_name": "SeparatedPathType.convert", "label": "convert",
+         "kind": "docs", "signature_changed": False, "file": "src/flask/cli.py", "type": "function"},
+    ],
+    "impacted": [{"id": f"i{k}", "depth": 1} for k in range(4)] + [{"id": "i4", "depth": 2}],
+    "modules": [{"label": "app + 3 files", "changed": 1, "impacted": 5}, {"label": "helpers + 2 files", "changed": 2, "impacted": 0}],
+    "signals": [],
+    "files": [{"mapped": True, "test": False}] * 3 + [{"mapped": False, "test": True}] * 4 + [{"mapped": False, "test": False}] * 5,
+}
+
+
+@pytest.mark.parametrize("text,rule", [
+    ("In src/flask/helpers.py the _CollectErrors.raise_any method now raises a single exception instead of a list, "
+     "changing its signature and error handling.", "signature"),
+    ("This changes the signature of _CollectErrors.raise_any.", "signature"),
+    ("_CollectErrors.raise_any's parameters were updated.", "signature"),
+    ("get_expiration_time now accepts a timeout argument.", "signature"),
+    ("Five modules call the altered helpers.", "count"),
+    ("This is a backwards-incompatible change for session handling.", "breaking"),
+])
+def test_fact_check_rejects_paraphrased_claims(text, rule):
+    problem = pr_impact.contradicts_facts(text, FLASK_6168)
+    assert problem is not None and problem[0] == rule
+
+
+@pytest.mark.parametrize("text", [
+    "This PR removes Python 3.10 support and updates two runtime functions: _CollectErrors.raise_any now raises a single "
+    "exception, and SessionInterface.get_expiration_time returns the expiry directly. Five callers depend on them across "
+    "two modules, 4 of them direct. Reviewers should check error collection and session expiry. No signatures changed.",
+    "Updates _CollectErrors.raise_any and SessionInterface.get_expiration_time. This is not a breaking change.",
+])
+def test_fact_check_accepts_a_correct_summary(text):
+    assert pr_impact.contradicts_facts(text, FLASK_6168) is None
+
+
+def test_fact_check_allows_a_real_signature_change_on_the_named_node():
+    facts = {**FLASK_6168, "changes": [dict(FLASK_6168["changes"][0], signature_changed=True)] + FLASK_6168["changes"][1:]}
+    assert pr_impact.contradicts_facts("_CollectErrors.raise_any now takes an extra argument.", facts) is None
+    # ...but not on another node in the same sentence
+    assert pr_impact.contradicts_facts("get_expiration_time's signature changed.", facts)[0] == "signature"
+
+
+@pytest.mark.asyncio
+async def test_rejected_summary_falls_back_to_rules_and_logs_only_node_ids(caplog):
+    result = run({"app/scaffold.py": PY}, {"app/scaffold.py": PY.replace("return x + 1", "return x + 2")})
+    bad = "Changing the signature of helper, this breaks callers."
+    with patch("pr_impact.ai_summary", return_value=bad), caplog.at_level("INFO", logger="codegraph.pr"):
+        out = await pr_impact.summarise(result)
+    assert out["summary"]["source"] == "rules"
+    log = "\n".join(r.getMessage() for r in caplog.records)
+    assert "signature check" in log and "app/scaffold.py::helper" in log and bad not in log
+
+
+
+# ---------------------------------------------------------------------------
+# Production sentences: #6176 and #6168 must fail, #6133 (an added method) must pass
+# ---------------------------------------------------------------------------
+FLASK_6176 = {
+    "changes": [
+        {"id": "src/flask/app.py::Flask.__init_subclass__", "qualified_name": "Flask.__init_subclass__", "label": "__init_subclass__",
+         "kind": "modified", "signature_changed": False, "file": "src/flask/app.py", "type": "function"},
+    ] + [
+        {"id": f"src/flask/app.py::Flask.m{i}", "qualified_name": f"Flask.m{i}", "label": f"m{i}", "kind": "docs",
+         "signature_changed": False, "file": "src/flask/app.py", "type": "function"} for i in range(13)
+    ],
+    "impacted": [], "modules": [{"label": "app + 3 files", "changed": 1, "impacted": 0}], "signals": [],
+    "files": [{"mapped": True, "test": False}],
+}
+FLASK_6133 = {
+    "changes": [{"id": "src/flask/sansio/scaffold.py::Scaffold.query", "qualified_name": "Scaffold.query", "label": "query",
+                 "kind": "added", "signature_changed": False, "file": "src/flask/sansio/scaffold.py", "type": "function"}],
+    "impacted": [], "modules": [{"label": "sansio", "changed": 1, "impacted": 0}], "signals": [],
+    "files": [{"mapped": True, "test": False}, {"mapped": False, "test": True}],
+}
+
+
+def test_production_6176_signature_claim_fails():
+    text = ("This pull request updates the Flask application class to reflect a change in the `__init_subclass__` signature, "
+            "adding a `versionchanged` note to the documentation.")
+    assert pr_impact.contradicts_facts(text, FLASK_6176) == ("signature", ["src/flask/app.py::Flask.__init_subclass__"])
+
+
+def test_production_6168_sentences_fail():
+    assert pr_impact.contradicts_facts(
+        "_CollectErrors.raise_any now raises a single exception instead of a list, changing its signature.", FLASK_6168)[0] == "signature"
+    assert pr_impact.contradicts_facts("Five modules call the altered helpers.", FLASK_6168)[0] == "count"
+
+
+def test_production_6133_new_method_signature_passes():
+    text = ("The PR adds a new `query` route decorator to the `Scaffold` class. Also confirm that the new method’s signature "
+            "and behavior match the intended design and that any documentation or examples are updated accordingly.")
+    assert pr_impact.contradicts_facts(text, FLASK_6133) is None
+    assert pr_impact.contradicts_facts("Verify the new method's signature matches the design.", FLASK_6133) is None
+    assert pr_impact.contradicts_facts("Scaffold.query's signature is new.", FLASK_6133) is None
+
+
+def test_stored_ai_summary_is_checked_when_served():
+    result = run({"app/scaffold.py": PY}, {"app/scaffold.py": PY.replace("return x + 1", "return x + 2")})
+    result["summary"] = {"text": "helper now raises instead, changing its signature.", "source": "ai"}
+    served = pr_impact.checked_summary(result)
+    assert served["summary"]["source"] == "rules" and "helper" in served["summary"]["text"]
+    assert result["summary"]["source"] == "ai"  # the stored result itself is untouched
+    good = dict(result, summary={"text": "helper now adds two instead of one.", "source": "ai"})
+    assert pr_impact.checked_summary(good) is good
+    old_shape = {"summary": {"text": "changing its signature", "source": "ai"}}  # missing fields: served as is
+    assert pr_impact.checked_summary(old_shape) is old_shape

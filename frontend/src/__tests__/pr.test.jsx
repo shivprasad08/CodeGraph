@@ -200,6 +200,54 @@ describe('PR view', () => {
   });
 });
 
+describe('outdated PR result', () => {
+  it('shows the old result marked as out of date, then swaps in the recalculated one', async () => {
+    const jobs = {};
+    api.subscribeToJob.mockImplementation((id, onEvent, _err, onDone) => {
+      jobs[id] = { onEvent, onDone };
+      if (id === 'j1') queueMicrotask(() => onDone({ status: 'done' }));
+      return () => {};
+    });
+    api.fetchPR.mockImplementation(async (id) =>
+      id === 'j1'
+        ? { ...RESULT, risk: { ...RESULT.risk, score: 44, level: 'medium' }, recalculating: { job_id: 'j2' } }
+        : { ...RESULT, result_version: 2, risk: { ...RESULT.risk, score: 3, level: 'low' } },
+    );
+    render(
+      <MemoryRouter initialEntries={['/pr/acme/app/7/jobs/j1']}>
+        <Routes>
+          <Route path="/pr/:owner/:repo/:number/jobs/:jobId" element={<PRView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/older version of the scoring and is out of date/)).toBeTruthy();
+    expect(screen.getByText('Medium risk')).toBeTruthy();
+    await waitFor(() => expect(jobs.j2).toBeTruthy());
+    await act(async () => {
+      jobs.j2.onEvent({ progress: 50 });
+      await jobs.j2.onDone({ status: 'done' });
+    });
+    expect(await screen.findByText('Low risk')).toBeTruthy();
+    expect(screen.queryByText(/out of date/)).toBeNull();
+  });
+
+  it('/analyses marks an outdated PR result instead of showing its risk as current', async () => {
+    act(() => __setSession({ status: 'signed_in', user: { login: 'dev' } }));
+    api.fetchMyAnalyses.mockResolvedValue({
+      signed_in: true,
+      analyses: [{ id: 'ua-1', job_id: 'j1', kind: 'pr', repo: 'acme/app', pr_number: 7, pr_title: 'Old', risk_level: 'medium', risk_score: 44, status: 'done', stale: true, recalculating: false, created_at: '2026-11-10T10:00:00Z', shares: 0, languages: [] }],
+    });
+    render(
+      <MemoryRouter>
+        <AnalysesView />
+      </MemoryRouter>,
+    );
+    const row = (await screen.findByRole('link', { name: 'acme/app' })).closest('li');
+    expect(row.textContent).toContain('Outdated score');
+    expect(row.textContent).not.toContain('Medium risk');
+  });
+});
+
 describe('docs-only PR', () => {
   it('lists docs changes with a "docs only" badge, scores nothing and has nothing to trace', async () => {
     const docsOnly = {

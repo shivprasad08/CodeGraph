@@ -88,8 +88,9 @@ function Header({ pr }) {
  * @param {object} [props.staticResult] A loaded PR result (shared view).
  * @param {object} [props.shared] { sharedBy, expiresAt } for a shared, read-only view.
  * @param {string} [props.jobId] Job id when not taken from the route.
+ * @param {{job_id: string}} [props.recalculating] The stored result is outdated and this job recomputes it.
  */
-export default function PRView({ staticResult = null, shared = null, jobId: jobIdProp } = {}) {
+export default function PRView({ staticResult = null, shared = null, jobId: jobIdProp, recalculating = null } = {}) {
   const params = useParams();
   const navigate = useNavigate();
   const session = useSession();
@@ -103,6 +104,9 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
   const [tab, setTab] = useState('changes');
   const [selectedId, setSelectedId] = useState(null);
   const [shareOpen, setShareOpen] = useState(false);
+  // An outdated stored result is shown, marked, while this job recomputes it
+  const [recalcJob, setRecalcJob] = useState(recalculating?.job_id ?? null);
+  const [recalc, setRecalc] = useState({ progress: 0, failed: false });
 
   const owner = result?.pr?.owner ?? params.owner;
   const repo = result?.pr?.repo ?? params.repo;
@@ -125,7 +129,9 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
       },
       async () => {
         try {
-          setResult(await fetchPR(jobId));
+          const loaded = await fetchPR(jobId);
+          setResult(loaded);
+          if (loaded.recalculating?.job_id) setRecalcJob(loaded.recalculating.job_id);
           setPhase('done');
         } catch (err) {
           setError(err.message);
@@ -135,6 +141,25 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
       },
     );
   }, [jobId, staticResult]);
+
+  useEffect(() => {
+    if (!recalcJob) return undefined;
+    setRecalc({ progress: 0, failed: false });
+    return subscribeToJob(
+      recalcJob,
+      (data) => setRecalc((r) => ({ ...r, progress: data.progress ?? r.progress })),
+      () => setRecalc((r) => ({ ...r, failed: true })),
+      async () => {
+        try {
+          const fresh = await fetchPR(recalcJob);
+          setResult(fresh);
+          setRecalcJob(null);
+        } catch {
+          setRecalc((r) => ({ ...r, failed: true }));
+        }
+      },
+    );
+  }, [recalcJob]);
 
   const selectChange = (id) => {
     setSelectedId(id);
@@ -274,6 +299,13 @@ export default function PRView({ staticResult = null, shared = null, jobId: jobI
       )}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
         <aside aria-label="Risk and summary" className="flex flex-col gap-3 border-cg-border p-4 sm:px-6 lg:w-[380px] lg:shrink-0 lg:overflow-y-auto lg:border-r lg:px-4">
+          {recalcJob && (
+            <p role="status" className="rounded-cg-control border border-cg-sev-med px-3 py-2 text-cg-sm text-cg-secondary">
+              {recalc.failed
+                ? "This result was computed with an older version of the scoring and couldn't be recalculated just now. Reload the page to try again."
+                : `This result was computed with an older version of the scoring and is out of date. Recalculating… ${Math.round(recalc.progress || 0)}%`}
+            </p>
+          )}
           {result.partial && (
             <p role="note" className="rounded-cg-control border border-cg-border bg-cg-raised px-3 py-2 text-cg-sm text-cg-secondary">
               Partial result: some files couldn&apos;t be mapped to the graph.{' '}
